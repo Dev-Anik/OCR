@@ -1,96 +1,171 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>OCR</title>
-	<script src="https://unpkg.com/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
-	<style>
-		#video,
-		#canvas {
-			width: 100%;
-			height: auto;
-		}
-		#video{
-			display: none;
-		}
-	</style>
-
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OCR (improved)</title>
+  <script src="https://unpkg.com/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 12px; }
+    #video, #canvas { width: 100%; height: auto; display:block; margin-bottom:8px; }
+    #canvas { border:1px solid #ccc; }
+    #overlayBox { position: absolute; pointer-events:none; border: 2px dashed rgba(255,0,0,0.6); }
+  </style>
 </head>
-
 <body>
-	<h1>OCR</h1>
-	<video id="video"></video>
-	<canvas id="canvas"></canvas>
-	<p id="progress"></p>
-	<p id="result"></p>
+  <h1>OCR (improved)</h1>
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+  <p id="progress"></p>
+  <p id="result"></p>
 
-	<!-- OCR script -->
-	<script>
-		var videoElem = document.getElementById('video');
-		var canvasElem = document.getElementById('canvas');
-		var buf = document.createElement('canvas');
-		document.body.append(buf);
-		var progressElem = document.getElementById('progress');
-		var resultElem = document.getElementById('result');
-		navigator.mediaDevices.getUserMedia({
-				video: {
-					facingMode: "environment"
-				},
-				audio: false
-			})
-			.then(function (stream) {
-				videoElem.srcObject = stream;
-				videoElem.play();
-				setInterval(function () {
-					canvasElem.width = videoElem.videoWidth;
-					canvasElem.height = videoElem.videoHeight;
-					var ctx = canvasElem.getContext('2d');
-					ctx.drawImage(videoElem, 0, 0, video.videoWidth, video.videoHeight, 0, 0, canvasElem.width,
-						canvasElem.height);
-					var box = {
-						x: 50,
-						h: 100
-					};
-					box.y = (canvasElem.height - box.h) / 2;
-					box.w = (canvasElem.width - box.x * 2);
-					ctx.beginPath();
-					ctx.rect(box.x, box.y, box.w, box.h);
-					ctx.stroke();
-					buf.width = box.w;
-					buf.height = box.h;
-					var isRecognizing = false;
+  <script>
+  (async function(){
+    const videoElem = document.getElementById('video');
+    const canvasElem = document.getElementById('canvas');
+    const progressElem = document.getElementById('progress');
+    const resultElem = document.getElementById('result');
 
-					setInterval(function () {
-						(中略)
-						buf.getContext('2d').drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+    // Offscreen buffer - DO NOT append to document
+    const buf = document.createElement('canvas');
+    const bctx = buf.getContext('2d');
 
-						if (isRecognizing) return;
-						isRecognizing = true;
+    // Control flags
+    let isRecognizing = false;
+    // OCR interval (ms). Lower freq -> less CPU. 1000 = once/sec
+    const OCR_INTERVAL = 1000;
 
-						Tesseract.recognize(
-								buf,
-								'eng', {
-									logger: function (e) {
-										progressElem.textContent = e.status;
-									}
-								}
-							)
-							.then(function (result) {
-								alert(result.data.text)
-								resultElem.textContent = result.data.text;
+    // Box (region to scan) in pixels relative to canvas
+    const box = { x:50, y:0, w:0, h:100 };
 
-								isRecognizing = false;
-							});
-					}, 200);
+    // Request camera (lower resolution to save CPU if you want)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+      videoElem.srcObject = stream;
+      await videoElem.play();
+    } catch (err) {
+      resultElem.textContent = 'Camera error: ' + err;
+      console.error(err);
+      return;
+    }
 
-				}, 200);
-			})
-			.catch(function (e) {
-				resultElem.textContent = JSON.stringify(e);
-			});
-	</script>
+    // Prepare Tesseract worker for better performance
+    const { createWorker } = Tesseract;
+    const worker = createWorker({
+      logger: m => {
+        // m: { status, progress }
+        if (m.progress != null) {
+          progressElem.textContent = `${m.status} — ${Math.round(m.progress * 100)}%`;
+        } else {
+          progressElem.textContent = m.status || '';
+        }
+      }
+    });
+
+    await worker.load();
+    await worker.loadLanguage('eng');
+    await worker.initialize('eng');
+
+    // Resize canvas to match video (when ready)
+    function resizeCanvasesIfNeeded() {
+      const vw = videoElem.videoWidth;
+      const vh = videoElem.videoHeight;
+      if (!vw || !vh) return;
+      // match visible canvas size to video natural size
+      canvasElem.width = vw;
+      canvasElem.height = vh;
+      // define box geometry (centered vertical)
+      box.y = Math.round((canvasElem.height - box.h) / 2);
+      box.w = Math.round(canvasElem.width - box.x * 2);
+      // buf will be set when we actually capture (we will downscale there)
+    }
+
+    // Draw preview & box with requestAnimationFrame
+    const ctx = canvasElem.getContext('2d');
+    function drawLoop() {
+      resizeCanvasesIfNeeded();
+      if (canvasElem.width && canvasElem.height) {
+        ctx.drawImage(videoElem, 0, 0, canvasElem.width, canvasElem.height);
+        // draw ROI box
+        ctx.beginPath();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(255,0,0,0.8)';
+        ctx.rect(box.x, box.y, box.w, box.h);
+        ctx.stroke();
+      }
+      requestAnimationFrame(drawLoop);
+    }
+    requestAnimationFrame(drawLoop);
+
+    // OCR capture + processing function
+    async function doOcrOnce() {
+      if (isRecognizing) return;
+      // ensure video + canvas ready
+      if (!canvasElem.width || !canvasElem.height) return;
+
+      // Downscale factor for OCR frame (smaller -> faster)
+      const scale = 0.6; // tune between 0.4 - 1.0
+      const targetW = Math.max(100, Math.round(box.w * scale));
+      const targetH = Math.max(30, Math.round(box.h * scale));
+      buf.width = targetW;
+      buf.height = targetH;
+
+      // Copy ROI from visible canvas into buf (this also keeps buf offscreen)
+      bctx.drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, targetW, targetH);
+
+      // Optional: simple contrast boosting / grayscale to help OCR (lightweight)
+      try {
+        const imageData = bctx.getImageData(0, 0, targetW, targetH);
+        const data = imageData.data;
+        // convert to grayscale + simple threshold-ish contrast boost
+        for (let i = 0; i < data.length; i += 4) {
+          // luminance
+          const L = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+          // boost contrast: center and scale
+          let v = (L - 128) * 1.3 + 128;
+          // tiny threshold to reduce noise
+          if (v < 80) v = v * 0.8;
+          data[i] = data[i+1] = data[i+2] = v;
+        }
+        bctx.putImageData(imageData, 0, 0);
+      } catch (e) {
+        // some browsers may restrict getImageData on cross-origin canvases; ignore if fails
+      }
+
+      isRecognizing = true;
+      try {
+        const { data: { text } } = await worker.recognize(buf);
+        resultElem.textContent = text.trim();
+      } catch (err) {
+        console.error('OCR error', err);
+      } finally {
+        isRecognizing = false;
+      }
+    }
+
+    // Periodically run OCR at controlled interval
+    const ocrTimer = setInterval(doOcrOnce, OCR_INTERVAL);
+
+    // When page unload, terminate worker & timers
+    window.addEventListener('beforeunload', async () => {
+      clearInterval(ocrTimer);
+      try { await worker.terminate(); } catch(e) {}
+      // stop camera
+      const tracks = videoElem.srcObject?.getTracks?.();
+      if (tracks) tracks.forEach(t => t.stop());
+    });
+
+    // optional: run first OCR after small delay so video can stabilize
+    setTimeout(doOcrOnce, 800);
+
+  })();
+  </script>
 </body>
-
 </html>
