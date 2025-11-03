@@ -7,7 +7,8 @@
 	<title>OCR</title>
 	<script src="https://unpkg.com/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
 	<style>
-		#video, #canvas {
+		#video,
+		#canvas {
 			width: 100%;
 			height: auto;
 		}
@@ -25,6 +26,8 @@
 	<script>
 		var videoElem = document.getElementById('video');
 		var canvasElem = document.getElementById('canvas');
+		var buf = document.createElement('canvas');
+		document.body.append(buf);
 		var progressElem = document.getElementById('progress');
 		var resultElem = document.getElementById('result');
 		navigator.mediaDevices.getUserMedia({
@@ -36,15 +39,51 @@
 			.then(function (stream) {
 				videoElem.srcObject = stream;
 				videoElem.play();
-				setInterval(function(){
+				setInterval(function () {
 					canvasElem.width = videoElem.videoWidth;
 					canvasElem.height = videoElem.videoHeight;
 					var ctx = canvasElem.getContext('2d');
-					ctx.drawImage(videoElem, 0, 0,  video.videoWidth, video.videoHeight, 0, 0, canvasElem.width, canvasElem.height);
-				},200);
+					ctx.drawImage(videoElem, 0, 0, video.videoWidth, video.videoHeight, 0, 0, canvasElem.width,
+						canvasElem.height);
+					var box = {
+						x: 50,
+						h: 100
+					};
+					box.y = (canvasElem.height - box.h) / 2;
+					box.w = (canvasElem.width - box.x * 2);
+					ctx.beginPath();
+					ctx.rect(box.x, box.y, box.w, box.h);
+					ctx.stroke();
+					buf.width = box.w;
+					buf.height = box.h;
+					var isRecognizing = false;
+
+					setInterval(function () {
+						(中略)
+						buf.getContext('2d').drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+
+						if (isRecognizing) return;
+						isRecognizing = true;
+
+						Tesseract.recognize(
+								buf,
+								'eng', {
+									logger: function (e) {
+										document.querySelector('#progress').textContent = e.status;
+									}
+								}
+							)
+							.then(function (result) {
+								document.querySelector('#result').textContent = result.data.text;
+
+								isRecognizing = false;
+							});
+					}, 200);
+
+				}, 200);
 			})
 			.catch(function (e) {
-				resultElem.textContent=JSON.stringify(e);
+				resultElem.textContent = JSON.stringify(e);
 			});
 	</script>
 </body>
