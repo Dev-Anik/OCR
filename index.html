@@ -1,93 +1,101 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>OCR</title>
-	<script src="https://unpkg.com/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
-	<style>
-		#video,
-		#canvas {
-			width: 100%;
-			height: auto;
-		}
-	</style>
-
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OCR</title>
+  <script src="https://unpkg.com/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
+  <style>
+    #video, #canvas { width: 100%; height: auto; display:block; }
+    #canvas { border:1px solid #ccc; }
+  </style>
 </head>
-
 <body>
-	<h1>OCR</h1>
-	<video id="video"></video>
-	<canvas id="canvas"></canvas>
-	<p id="progress"></p>
-	<p id="result"></p>
+  <h1>OCR</h1>
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+  <p id="progress"></p>
+  <p id="result"></p>
 
-	<!-- OCR script -->
-	<script>
-		var videoElem = document.getElementById('video');
-		var canvasElem = document.getElementById('canvas');
-		var buf = document.createElement('canvas');
-		document.body.append(buf);
-		var progressElem = document.getElementById('progress');
-		var resultElem = document.getElementById('result');
-		navigator.mediaDevices.getUserMedia({
-				video: {
-					facingMode: "environment"
-				},
-				audio: false
-			})
-			.then(function (stream) {
-				videoElem.srcObject = stream;
-				videoElem.play();
-				setInterval(function () {
-					canvasElem.width = videoElem.videoWidth;
-					canvasElem.height = videoElem.videoHeight;
-					var ctx = canvasElem.getContext('2d');
-					ctx.drawImage(videoElem, 0, 0, video.videoWidth, video.videoHeight, 0, 0, canvasElem.width,
-						canvasElem.height);
-					var box = {
-						x: 50,
-						h: 100
-					};
-					box.y = (canvasElem.height - box.h) / 2;
-					box.w = (canvasElem.width - box.x * 2);
-					ctx.beginPath();
-					ctx.rect(box.x, box.y, box.w, box.h);
-					ctx.stroke();
-					buf.width = box.w;
-					buf.height = box.h;
-					var isRecognizing = false;
+  <script>
+    const videoElem = document.getElementById('video');
+    const canvasElem = document.getElementById('canvas');
+    const progressElem = document.getElementById('progress');
+    const resultElem = document.getElementById('result');
 
-					setInterval(function () {
-						(中略)
-						buf.getContext('2d').drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+    // offscreen buffer to capture the box region
+    const buf = document.createElement('canvas');
 
-						if (isRecognizing) return;
-						isRecognizing = true;
+    let isRecognizing = false;
 
-						Tesseract.recognize(
-								buf,
-								'eng', {
-									logger: function (e) {
-										progressElem.textContent = e.status;
-									}
-								}
-							)
-							.then(function (result) {
-								alert(result.data.text)
-								resultElem.textContent = result.data.text;
+    // Get camera
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+      .then(stream => {
+        videoElem.srcObject = stream;
 
-								isRecognizing = false;
-							});
-					}, 200);
+        // Wait until we know video dimensions
+        videoElem.addEventListener('loadedmetadata', () => {
+          // set canvas size to video size (you can scale to match display if needed)
+          canvasElem.width = videoElem.videoWidth;
+          canvasElem.height = videoElem.videoHeight;
 
-				}, 200);
-			})
-			.catch(function (e) {
-				resultElem.textContent = JSON.stringify(e);
-			});
-	</script>
+          // define capture box (example: centered thin horizontal box)
+          const box = {
+            x: 50,
+            h: 100
+          };
+          box.y = (canvasElem.height - box.h) / 2;
+          box.w = (canvasElem.width - box.x * 2);
+
+          // prepare buffer size
+          buf.width = box.w;
+          buf.height = box.h;
+
+          const ctx = canvasElem.getContext('2d');
+          const bufCtx = buf.getContext('2d');
+
+          // single interval: draw video -> overlay box -> every N ms capture & OCR if not busy
+          const intervalMs = 800; // slower OCR interval (tweak as needed)
+          setInterval(async () => {
+            // draw current video frame to visible canvas
+            ctx.drawImage(videoElem, 0, 0, videoElem.videoWidth, videoElem.videoHeight,
+              0, 0, canvasElem.width, canvasElem.height);
+
+            // draw rectangle overlay
+            ctx.beginPath();
+            ctx.rect(box.x, box.y, box.w, box.h);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'red';
+            ctx.stroke();
+
+            if (isRecognizing) return; // already running OCR
+
+            // copy the box region into buffer
+            bufCtx.clearRect(0, 0, buf.width, buf.height);
+            bufCtx.drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+
+            isRecognizing = true;
+            progressElem.textContent = 'recognizing...';
+
+            try {
+              const { data: { text } } = await Tesseract.recognize(buf, 'eng', {
+                logger: m => {
+                  // you can display percent or status messages here
+                  progressElem.textContent = `${m.status}${m.progress ? ' ' + Math.round(m.progress*100) + '%' : ''}`;
+                }
+              });
+              resultElem.textContent = text.trim();
+            } catch (err) {
+              resultElem.textContent = 'OCR error: ' + err.message;
+            } finally {
+              isRecognizing = false;
+            }
+          }, intervalMs);
+        });
+      })
+      .catch(err => {
+        resultElem.textContent = 'Camera error: ' + err.message;
+      });
+  </script>
 </body>
-
 </html>
