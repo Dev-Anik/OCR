@@ -74,6 +74,7 @@
 								}
 							)
 							.then(function (result) {
+								alert(result.data.text)
 								resultElem.textContent = result.data.text;
 
 								isRecognizing = false;
