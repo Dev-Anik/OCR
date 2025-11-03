@@ -43,13 +43,7 @@
     // 1️⃣ Initialize Tesseract worker
     // -----------------------------
     const { createWorker } = Tesseract;
-    const worker = createWorker({
-      logger: m => {
-        if (m.status) {
-          progressElem.textContent = `${m.status} ${ (m.progress || 0).toFixed(2) }`;
-        }
-      }
-    });
+    const worker = createWorker();
 
     async function initWorker() {
       await worker.load();
