@@ -1,101 +1,100 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>OCR (camera → Tesseract)</title>
-
-  <!-- Tesseract.js (v3+) -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Manual OCR Scan</title>
   <script src="https://unpkg.com/tesseract.js@v3.0.3/dist/tesseract.min.js"></script>
-
   <style>
-    #video, #canvas { width: 100%; height: auto; display:block; }
-    /* hide the offscreen buffer and keep video/canvas visible */
-    #buffer { display:none; }
-    .overlay-rect { position: absolute; pointer-events: none; border: 2px solid red; box-sizing: border-box; }
-    .wrap { position: relative; max-width: 640px; margin: 0 auto; }
+    #video, #canvas {
+      width: 100%;
+      height: auto;
+    }
+    #scanBtn {
+      margin: 10px 0;
+      padding: 10px 20px;
+      font-size: 16px;
+    }
   </style>
 </head>
 <body>
-  <h1>OCR demo</h1>
-
-  <div class="wrap">
-    <video id="video" playsinline autoplay muted></video>
-    <canvas id="canvas"></canvas>
-    <!-- a visible box can be drawn on canvas; or we could overlay an HTML element -->
-  </div>
-
+  <h1>OCR Manual Scan</h1>
+  <button id="scanBtn">Scan Text</button>
   <p id="progress"></p>
   <p id="result"></p>
-
-  <canvas id="buffer"></canvas> <!-- offscreen buffer (hidden) -->
+  <video id="video" autoplay muted></video>
+  <canvas id="canvas"></canvas>
 
   <script>
-  (async function () {
     const videoElem = document.getElementById('video');
     const canvasElem = document.getElementById('canvas');
-    const buf = document.getElementById('buffer');
+    const buf = document.createElement('canvas'); // OCR buffer
     const progressElem = document.getElementById('progress');
     const resultElem = document.getElementById('result');
+    const scanBtn = document.getElementById('scanBtn');
 
-    // Keep single flags in outer scope
     let isRecognizing = false;
-    let lastOcrTime = 0;
-    const OCR_INTERVAL_MS = 1000; // at most 1 OCR per second
 
-    // start camera (prefer back camera)
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false
-      });
-      videoElem.srcObject = stream;
-    } catch (err) {
-      resultElem.textContent = 'Camera error: ' + err.message;
-      console.error(err);
-      return;
-    }
-
-    // wait until video metadata is available so we have videoWidth/videoHeight
-    await new Promise((resolve) => {
-      if (videoElem.readyState >= 1 && videoElem.videoWidth) return resolve();
-      videoElem.addEventListener('loadedmetadata', () => resolve(), { once: true });
-    });
-
-    // set canvas sizes to match video
-    function setSizes() {
-      canvasElem.width = videoElem.videoWidth;
-      canvasElem.height = videoElem.videoHeight;
-      buf.width = canvasElem.width;
-      buf.height = canvasElem.height;
-    }
-    setSizes();
-    // if orientation/size changes, update again (optional)
-    window.addEventListener('resize', setSizes);
-
-    // define OCR bounding box (pixels). Example: centered 60% width, 20% height
-    function getBox() {
-      const w = Math.floor(canvasElem.width * 0.6);
-      const h = Math.floor(canvasElem.height * 0.2);
-      const x = Math.floor((canvasElem.width - w) / 2);
-      const y = Math.floor((canvasElem.height - h) / 2);
-      return { x, y, w, h };
-    }
-
-    // use a Tesseract worker for better control (v3 supports createWorker)
+    // -----------------------------
+    // 1️⃣ Initialize Tesseract worker
+    // -----------------------------
     const { createWorker } = Tesseract;
     const worker = createWorker({
       logger: m => {
-        // m.status, m.progress numbers, etc.
-        if (m.status) progressElem.textContent = `${m.status} ${ (m.progress || 0).toFixed(2) }`;
+        if (m.status) {
+          progressElem.textContent = `${m.status} ${ (m.progress || 0).toFixed(2) }`;
+        }
       }
     });
 
-    await worker.load();
-    await worker.loadLanguage('eng');
-    await worker.initialize('eng');
+    async function initWorker() {
+      await worker.load();
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      console.log("Tesseract worker ready");
+    }
 
-    // draw loop: render video -> draw a rectangle overlay -> occasionally run OCR
+    // -----------------------------
+    // 2️⃣ Start camera preview
+    // -----------------------------
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false
+        });
+        videoElem.srcObject = stream;
+        await videoElem.play();
+
+        // wait until video metadata is ready (width/height available)
+        await new Promise(resolve => {
+          if (videoElem.readyState >= 1 && videoElem.videoWidth) return resolve();
+          videoElem.addEventListener('loadedmetadata', () => resolve(), { once: true });
+        });
+
+        canvasElem.width = videoElem.videoWidth;
+        canvasElem.height = videoElem.videoHeight;
+
+        drawLoop(); // start live video + rectangle loop
+
+      } catch (err) {
+        console.error("Camera error", err);
+        resultElem.textContent = "Camera not available or permission denied.";
+      }
+    }
+
+    // -----------------------------
+    // 3️⃣ Draw live video + rectangle
+    // -----------------------------
+    function getBox() {
+      // OCR rectangle area
+      const w = canvasElem.width - 100;
+      const h = 100;
+      const x = 50;
+      const y = (canvasElem.height - h) / 2;
+      return { x, y, w, h };
+    }
+
     function drawLoop() {
       const ctx = canvasElem.getContext('2d');
       ctx.drawImage(videoElem, 0, 0, canvasElem.width, canvasElem.height);
@@ -108,44 +107,43 @@
       ctx.strokeRect(box.x, box.y, box.w, box.h);
       ctx.restore();
 
-      const now = Date.now();
-      // throttle OCR so it doesn't run every frame
-      if (!isRecognizing && (now - lastOcrTime) > OCR_INTERVAL_MS) {
-        isRecognizing = true;
-        lastOcrTime = now;
-
-        // copy the small area to buffer sized to box (reduces work)
-        buf.width = box.w;
-        buf.height = box.h;
-        const bctx = buf.getContext('2d');
-        // draw only the box area into the buffer
-        bctx.drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
-
-        // run OCR asynchronously
-        worker.recognize(buf).then(res => {
-          resultElem.textContent = res.data.text.replace(/\s+$/,'');
-        }).catch(err => {
-          console.error('OCR error', err);
-        }).finally(() => {
-          isRecognizing = false;
-        });
-      }
-
-      requestAnimationFrame(drawLoop);
+      requestAnimationFrame(drawLoop); // loop for live video
     }
 
-    requestAnimationFrame(drawLoop);
+    // -----------------------------
+    // 4️⃣ OCR function (manual)
+    // -----------------------------
+    async function runOCR() {
+      if (isRecognizing) return; // prevent multiple clicks
+      isRecognizing = true;
+      scanBtn.disabled = true;
 
-    // optional: cleanup on unload
-    window.addEventListener('beforeunload', async () => {
+      const box = getBox();
+      buf.width = box.w;
+      buf.height = box.h;
+      const bctx = buf.getContext('2d');
+      bctx.drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+
       try {
-        await worker.terminate();
-      } catch (e) { /* ignore */ }
-      // stop camera tracks
-      (videoElem.srcObject && videoElem.srcObject.getTracks().forEach(t => t.stop()));
-    });
+        const res = await worker.recognize(buf);
+        resultElem.textContent = res.data.text.replace(/\s+$/, '');
+      } catch (err) {
+        console.error("OCR error", err);
+      } finally {
+        isRecognizing = false;
+        scanBtn.disabled = false;
+      }
+    }
 
-  })();
+    scanBtn.addEventListener('click', runOCR);
+
+    // -----------------------------
+    // 5️⃣ Initialize everything
+    // -----------------------------
+    (async () => {
+      await initWorker();
+      await startCamera();
+    })();
   </script>
 </body>
 </html>
