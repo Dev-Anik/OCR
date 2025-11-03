@@ -22,8 +22,12 @@
   <button id="scanBtn">Scan Text</button>
   <p id="progress"></p>
   <p id="result"></p>
-  <video id="video" autoplay muted></video>
-  <canvas id="canvas"></canvas>
+  <div class="wrap" style="position:relative; max-width:640px;">
+  <video id="video" autoplay muted playsinline
+         style="position:absolute; inset:0; width:100%; height:100%; opacity:0;"></video>
+  <canvas id="canvas" style="position:relative; display:block; width:100%; height:auto;"></canvas>
+</div>
+
 
   <script>
     const videoElem = document.getElementById('video');
