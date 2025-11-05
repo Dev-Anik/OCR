@@ -49,87 +49,137 @@
 </head>
 <body>
     <h1>OCR Scanner</h1>
-    <video id="video" autoplay muted playsinline style="display:none;"></video>
-    <canvas id="canvas"></canvas>
+    <div id="ocr-wrap">
+    <video id="ocr-video" autoplay muted playsinline style="display:none;"></video>
+    <canvas id="ocr-canvas"></canvas>
+    </div>
     <button id="scanBtn">Scan Text</button>
     <div id="result"></div>
 
-    <script>
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+<script>
+    // ============================================
+    // OCR FUNCTIONALITY
+    // ============================================
+    let ocrContainer, videoElem, canvasElem;
+    let ocrWorker = null;
+    let ocrStream = null;
+    let isRecognizing = false;
+    let scanIntervalId = null;
+    let drawAnimationId = null;
+    ocrContainer = document.getElementById('ocr-wrap');
+        videoElem = document.getElementById('ocr-video');
+        canvasElem = document.getElementById('ocr-canvas');
+        startOCR();
+    async function startOCR() {
+        if (!videoElem || !canvasElem) {
+            console.error("OCR elements not found");
+            return;
+        }
+
         const scanBtn = document.getElementById('scanBtn');
-        const result = document.getElementById('result');
+        if (scanBtn) {
+            scanBtn.removeEventListener('click', runOCR);
+            scanBtn.addEventListener('click', runOCR);
+        }
 
-        let worker;
-        let isScanning = false;
+        await initOCRWorker();
+        await startOCRCamera();
+    }
 
-        // Initialize Tesseract
-        async function init() {
-            worker = await Tesseract.createWorker();
-            await worker.loadLanguage('eng');
-            await worker.initialize('eng');
-            
-            // Start camera
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'environment' }
+    async function initOCRWorker() {
+        if (ocrWorker) return;
+        
+        const { createWorker } = Tesseract;
+        ocrWorker = createWorker();
+        
+        try {
+            await ocrWorker.load();
+            await ocrWorker.loadLanguage('eng');
+            await ocrWorker.initialize('eng');
+            console.log("Tesseract worker ready");
+        } catch (err) {
+            console.error("OCR worker init failed:", err);
+        }
+    }
+
+    async function startOCRCamera() {
+        try {
+            ocrStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: { ideal: "environment" } },
+                audio: false
             });
-            video.srcObject = stream;
             
-            video.onloadedmetadata = () => {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-                drawFrame();
-            };
-        }
+            videoElem.srcObject = ocrStream;
+            await videoElem.play();
 
-        // Draw video frame with scan area
-        function drawFrame() {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            // Draw scan rectangle
-            const w = canvas.width - 100;
-            const h = 130;
-            const x = 50;
-            const y = (canvas.height - h) / 2;
-            
+            await new Promise(resolve => {
+                if (videoElem.readyState >= 1 && videoElem.videoWidth) return resolve();
+                videoElem.addEventListener('loadedmetadata', resolve, { once: true });
+            });
+
+            canvasElem.width = videoElem.videoWidth;
+            canvasElem.height = videoElem.videoHeight;
+
+            startDrawLoop();
+            console.log("OCR camera started");
+        } catch (err) {
+            console.error("Camera error:", err);
+            alert("Camera not available or permission denied");
+        }
+    }
+
+    function startDrawLoop() {
+        if (drawAnimationId) cancelAnimationFrame(drawAnimationId);
+        
+        const draw = () => {
+            const ctx = canvasElem.getContext('2d');
+            ctx.drawImage(videoElem, 0, 0, canvasElem.width, canvasElem.height);
+
+            const box = getOCRBox();
+            ctx.save();
+            ctx.lineWidth = 2;
             ctx.strokeStyle = 'red';
-            ctx.lineWidth = 3;
-            ctx.strokeRect(x, y, w, h);
-            
-            requestAnimationFrame(drawFrame);
-        }
+            ctx.strokeRect(box.x, box.y, box.w, box.h);
+            ctx.restore();
 
-        // Scan text
-        async function scan() {
-            if (isScanning) return;
-            
-            isScanning = true;
-            scanBtn.disabled = true;
-            result.textContent = 'Scanning...';
-            
-            // Get scan area
-            const w = canvas.width - 100;
-            const h = 130;
-            const x = 50;
-            const y = (canvas.height - h) / 2;
-            
-            // Create cropped canvas
-            const crop = document.createElement('canvas');
-            crop.width = w;
-            crop.height = h;
-            crop.getContext('2d').drawImage(canvas, x, y, w, h, 0, 0, w, h);
-            
-            // Run OCR
-            const { data } = await worker.recognize(crop);
-            result.textContent = data.text.trim() || 'No text detected';
-            
-            isScanning = false;
-            scanBtn.disabled = false;
-        }
+            drawAnimationId = requestAnimationFrame(draw);
+        };
+        
+        draw();
+    }
 
-        scanBtn.addEventListener('click', scan);
-        init().catch(err => result.textContent = 'Error: ' + err.message);
-    </script>
+    function getOCRBox() {
+        const w = canvasElem.width - 100;
+        const h = 130;
+        const x = 50;
+        const y = 300;
+        return { x, y, w, h };
+    }
+
+    async function runOCR() {
+        if (isRecognizing || !ocrWorker) return;
+        
+        isRecognizing = true;
+        const scanBtn = document.getElementById('scan-again-btn');
+        if (scanBtn) scanBtn.disabled = true;
+
+        const box = getOCRBox();
+        const buf = document.createElement('canvas');
+        buf.width = box.w;
+        buf.height = box.h;
+        
+        const bctx = buf.getContext('2d');
+        bctx.drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+
+        try {
+		const res = await ocrWorker.recognize(buf);
+		    kensakuberResultField.value = res.data.text;
+		}catch (err) {
+            console.error("OCR error:", err);
+            alert("OCR failed: " + err.message);
+        }
+    }
+</script>
+
 </body>
 </html>
