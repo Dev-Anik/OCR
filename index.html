@@ -3,183 +3,301 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OCR Scanner</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/3.0.3/tesseract.min.js" integrity="sha512-H1fQK9Bq3J9b57b8AphvKXga+undvNxdulY+WmE6RSD4fELdrU76CRfDoIuOtEIBw2swteNSAlwPEfAsqwv/qQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <title>Simple OCR Scanner</title>
+    <script src='https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js'></script>
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body {
-            font-family: Arial, sans-serif;
-            max-width: 600px;
-            margin: 20px auto;
-            padding: 0 15px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
         }
-        #canvas {
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 800px;
             width: 100%;
-            border: 2px solid #333;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #667eea;
+            margin-bottom: 30px;
+            font-size: 2em;
+        }
+        
+        .camera-container {
+            position: relative;
+            width: 100%;
+            margin-bottom: 20px;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        
+        video {
+            width: 100%;
             display: block;
-            margin: 15px 0;
+            border-radius: 10px;
         }
-        #scanBtn {
-            width: 100%;
-            padding: 12px;
+        
+        canvas {
+            display: none;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            flex: 1;
+            padding: 15px 30px;
             font-size: 16px;
-            background: #007bff;
-            color: white;
+            font-weight: bold;
             border: none;
-            border-radius: 5px;
+            border-radius: 10px;
             cursor: pointer;
+            transition: all 0.3s;
+            min-width: 150px;
         }
-        #scanBtn:disabled {
-            background: #ccc;
+        
+        #startBtn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        #startBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        #captureBtn {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            display: none;
+        }
+        
+        #captureBtn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(245, 87, 108, 0.4);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
             cursor: not-allowed;
+            transform: none !important;
         }
-        #result {
+        
+        .status {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-weight: 500;
+            display: none;
+        }
+        
+        .status.info {
+            background: #e3f2fd;
+            color: #1976d2;
+            display: block;
+        }
+        
+        .status.success {
+            background: #e8f5e9;
+            color: #388e3c;
+            display: block;
+        }
+        
+        .status.error {
+            background: #ffebee;
+            color: #d32f2f;
+            display: block;
+        }
+        
+        .result-container {
+            background: #f5f5f5;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 100px;
+            display: none;
+        }
+        
+        .result-container.show {
+            display: block;
+        }
+        
+        .result-container h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+        
+        .result-text {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .progress-bar {
             width: 100%;
-            margin-top: 15px;
-            padding: 10px;
-            font-size: 16px;
-            border: 2px solid #ddd;
-            border-radius: 5px;
-        }
-        #status {
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
             margin-top: 10px;
-            font-size: 14px;
-            color: #666;
+            overflow: hidden;
+            display: none;
+        }
+        
+        .progress-bar.show {
+            display: block;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s;
         }
     </style>
 </head>
 <body>
-    <h1>OCR Scanner</h1>
-    <div id="ocr-wrap">
-    <video id="ocr-video" autoplay muted playsinline style="display:none;"></video>
-    <canvas id="ocr-canvas"></canvas>
+    <div class="container">
+        <h1>Testing OCR Scanner</h1>
+        
+        <div class="camera-container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="startBtn">Start Scan</button>
+            <button id="captureBtn">Capture & Read Text</button>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <div class="progress-bar" id="progressBar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        
+        <div id="result" class="result-container">
+            <h3>Extracted Text:</h3>
+            <div class="result-text" id="resultText"></div>
+        </div>
     </div>
-    <button id="scanBtn">Scan Text</button>
-    <div id="result"></div>
 
-<script>
-    // ============================================
-    // OCR FUNCTIONALITY
-    // ============================================
-    let ocrContainer, videoElem, canvasElem;
-    let ocrWorker = null;
-    let ocrStream = null;
-    let isRecognizing = false;
-    let scanIntervalId = null;
-    let drawAnimationId = null;
-    ocrContainer = document.getElementById('ocr-wrap');
-        videoElem = document.getElementById('ocr-video');
-        canvasElem = document.getElementById('ocr-canvas');
-        startOCR();
-    async function startOCR() {
-        if (!videoElem || !canvasElem) {
-            console.error("OCR elements not found");
-            return;
-        }
-
-        const scanBtn = document.getElementById('scanBtn');
-        if (scanBtn) {
-            scanBtn.removeEventListener('click', runOCR);
-            scanBtn.addEventListener('click', runOCR);
-        }
-
-        await initOCRWorker();
-        await startOCRCamera();
-    }
-
-    async function initOCRWorker() {
-        if (ocrWorker) return;
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const startBtn = document.getElementById('startBtn');
+        const captureBtn = document.getElementById('captureBtn');
+        const status = document.getElementById('status');
+        const result = document.getElementById('result');
+        const resultText = document.getElementById('resultText');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
         
-        const { createWorker } = Tesseract;
-        ocrWorker = createWorker();
-        
-        try {
-            await ocrWorker.load();
-            await ocrWorker.loadLanguage('eng');
-            await ocrWorker.initialize('eng');
-            console.log("Tesseract worker ready");
-        } catch (err) {
-            console.error("OCR worker init failed:", err);
-        }
-    }
+        let stream = null;
 
-    async function startOCRCamera() {
-        try {
-            ocrStream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: { ideal: "environment" } },
-                audio: false
-            });
+        function showStatus(message, type) {
+            status.textContent = message;
+            status.className = `status ${type}`;
+        }
+
+        function updateProgress(progress) {
+            progressFill.style.width = `${progress * 100}%`;
+        }
+
+        startBtn.addEventListener('click', async () => {
+            try {
+                showStatus('Requesting camera access...', 'info');
+                
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment' } 
+                });
+                
+                video.srcObject = stream;
+                
+                showStatus('Camera ready! Click "Capture & Read Text" to scan.', 'success');
+                startBtn.style.display = 'none';
+                captureBtn.style.display = 'block';
+                result.classList.remove('show');
+                
+            } catch (err) {
+                showStatus('Camera access denied or unavailable.', 'error');
+                console.error('Error accessing camera:', err);
+            }
+        });
+
+        captureBtn.addEventListener('click', async () => {
+            captureBtn.disabled = true;
+            showStatus('Processing image...', 'info');
+            progressBar.classList.add('show');
+            result.classList.remove('show');
             
-            videoElem.srcObject = ocrStream;
-            await videoElem.play();
-
-            await new Promise(resolve => {
-                if (videoElem.readyState >= 1 && videoElem.videoWidth) return resolve();
-                videoElem.addEventListener('loadedmetadata', resolve, { once: true });
-            });
-
-            canvasElem.width = videoElem.videoWidth;
-            canvasElem.height = videoElem.videoHeight;
-
-            startDrawLoop();
-            console.log("OCR camera started");
-        } catch (err) {
-            console.error("Camera error:", err);
-            alert("Camera not available or permission denied");
-        }
-    }
-
-    function startDrawLoop() {
-        if (drawAnimationId) cancelAnimationFrame(drawAnimationId);
-        
-        const draw = () => {
-            const ctx = canvasElem.getContext('2d');
-            ctx.drawImage(videoElem, 0, 0, canvasElem.width, canvasElem.height);
-
-            const box = getOCRBox();
-            ctx.save();
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = 'red';
-            ctx.strokeRect(box.x, box.y, box.w, box.h);
-            ctx.restore();
-
-            drawAnimationId = requestAnimationFrame(draw);
-        };
-        
-        draw();
-    }
-
-    function getOCRBox() {
-        const w = canvasElem.width - 100;
-        const h = 130;
-        const x = 50;
-        const y = 300;
-        return { x, y, w, h };
-    }
-
-    async function runOCR() {
-        if (isRecognizing || !ocrWorker) return;
-        
-        isRecognizing = true;
-        const scanBtn = document.getElementById('scan-again-btn');
-        if (scanBtn) scanBtn.disabled = true;
-
-        const box = getOCRBox();
-        const buf = document.createElement('canvas');
-        buf.width = box.w;
-        buf.height = box.h;
-        
-        const bctx = buf.getContext('2d');
-        bctx.drawImage(canvasElem, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
-
-        try {
-		const res = await ocrWorker.recognize(buf);
-		    kensakuberResultField.value = res.data.text;
-		}catch (err) {
-            console.error("OCR error:", err);
-            alert("OCR failed: " + err.message);
-        }
-    }
-</script>
-
+            // Capture frame from video
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            
+            try {
+                const imageData = canvas.toDataURL('image/png');
+                
+                showStatus('Reading text with OCR...', 'info');
+                
+                const worker = await Tesseract.createWorker({
+                    logger: m => {
+                        if (m.status === 'recognizing text') {
+                            updateProgress(m.progress);
+                        }
+                    }
+                });
+                
+                await worker.loadLanguage('eng');
+                await worker.initialize('eng');
+                
+                const { data: { text } } = await worker.recognize(imageData);
+                await worker.terminate();
+                
+                if (text.trim()) {
+                    resultText.textContent = text;
+                    result.classList.add('show');
+                    showStatus('Text extracted successfully!', 'success');
+                } else {
+                    showStatus('No text found. Try again with clearer text.', 'error');
+                }
+                
+                progressBar.classList.remove('show');
+                updateProgress(0);
+                
+            } catch (err) {
+                showStatus('Error processing image. Please try again.', 'error');
+                console.error('OCR Error:', err);
+                progressBar.classList.remove('show');
+            }
+            
+            captureBtn.disabled = false;
+        });
+    </script>
 </body>
 </html>
