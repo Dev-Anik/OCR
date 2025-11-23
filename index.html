@@ -300,9 +300,9 @@
             const tempCtx = tempCanvas.getContext('2d');
             tempCtx.putImageData(imageData, 0, 0);
 
-            // Enhance image for better OCR
-            tempCtx.filter = 'contrast(1.5) brightness(1.1)';
-            tempCtx.drawImage(tempCanvas, 0, 0);
+            // Advanced image preprocessing for higher confidence
+            const processedImageData = preprocessImage(tempCtx, areaWidth, areaHeight);
+            tempCtx.putImageData(processedImageData, 0, 0);
 
             try {
                 // Perform OCR
