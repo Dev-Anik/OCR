@@ -422,13 +422,15 @@
     if(worker) return;
     try{
       worker = await Tesseract.createWorker('eng', 1, {});
-      // Restrict recognizable characters to alphanumeric only (no symbols/punctuation).
-      // This keeps enough context for the engine to segment words correctly while
-      // cutting out noise, which makes it both faster and more accurate than an
-      // unrestricted charset or a digits-only charset (a digits-only whitelist would
-      // force every letter glyph to be misread as the nearest-looking digit).
+      // Restrict recognizable characters to alphanumeric + basic punctuation.
+      // This keeps enough context for the engine to segment words correctly
+      // while cutting out noise, which is faster and more accurate than an
+      // unrestricted charset or a digits-only charset (a digits-only
+      // whitelist would force every letter/symbol glyph to be misread as the
+      // nearest-looking digit). Punctuation is included so dashes/colons/
+      // slashes in real-world text don't get force-mapped into stray digits.
       await worker.setParameters({
-        tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+        tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,:-/',
         tessedit_pageseg_mode: '6', // assume a single uniform block of text
         preserve_interword_spaces: '1'
       });
@@ -480,7 +482,7 @@
 
     // Upscale small crops so small/far-away text has enough pixels for the
     // engine to work with. Target a minimum width of ~1000px.
-    const targetW = Math.max(srcW, 1000);
+    const targetW = Math.max(srcW, 1200);
     const upscale = targetW / srcW;
     const outW = Math.round(srcW * upscale);
     const outH = Math.round(srcH * upscale);
@@ -515,40 +517,68 @@
     return (sumSq / count) - (mean * mean); // variance of the Laplacian
   }
 
-  // Grayscale + Otsu-style adaptive binarization for cleaner OCR input
+  // Local adaptive thresholding (Bradley/Wellner method) instead of a single
+  // global threshold. A global threshold (e.g. Otsu) breaks down under the
+  // uneven lighting typical of a handheld phone shot — shadows, glare, or a
+  // brightness gradient across the crop can wash out or blacken whole
+  // sections of text and was very likely the main cause of inconsistent
+  // results. Adaptive thresholding compares each pixel to the *local*
+  // average brightness around it instead, so it holds up much better across
+  // an unevenly lit frame — it's the same core technique real document-
+  // scanner apps use.
+  function adaptiveThreshold(gray, w, h, out){
+    const integral = new Float64Array((w + 1) * (h + 1));
+    for(let y = 0; y < h; y++){
+      let rowSum = 0;
+      const rowOff = (y + 1) * (w + 1);
+      const prevRowOff = y * (w + 1);
+      for(let x = 0; x < w; x++){
+        rowSum += gray[y * w + x];
+        integral[rowOff + x + 1] = integral[prevRowOff + x + 1] + rowSum;
+      }
+    }
+
+    const windowSize = Math.max(15, Math.round(w / 8));
+    const half = windowSize >> 1;
+    const t = 0.15; // sensitivity: pixel must be this much brighter than local mean to count as background
+
+    for(let y = 0; y < h; y++){
+      const y1 = Math.max(0, y - half);
+      const y2 = Math.min(h - 1, y + half);
+      for(let x = 0; x < w; x++){
+        const x1 = Math.max(0, x - half);
+        const x2 = Math.min(w - 1, x + half);
+        const count = (x2 - x1 + 1) * (y2 - y1 + 1);
+        const sum =
+          integral[(y2 + 1) * (w + 1) + (x2 + 1)] -
+          integral[y1 * (w + 1) + (x2 + 1)] -
+          integral[(y2 + 1) * (w + 1) + x1] +
+          integral[y1 * (w + 1) + x1];
+        const mean = sum / count;
+        const p = gray[y * w + x];
+        out[y * w + x] = p > mean * (1 - t) ? 255 : 0;
+      }
+    }
+  }
+
+  // Grayscale conversion + adaptive binarization for cleaner OCR input
   function preprocess(ctx, w, h){
     const imgData = ctx.getImageData(0, 0, w, h);
     const d = imgData.data;
     const n = w * h;
     const gray = new Uint8ClampedArray(n);
-    const hist = new Uint32Array(256);
 
     for(let i = 0, p = 0; i < d.length; i += 4, p++){
-      const g = (0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]) | 0;
-      gray[p] = g;
-      hist[g]++;
+      gray[p] = (0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]) | 0;
     }
 
     const sharpness = estimateSharpness(gray, w, h);
 
-    let sum = 0;
-    for(let t = 0; t < 256; t++) sum += t * hist[t];
-    let sumB = 0, wB = 0, wF = 0, maxVar = 0, threshold = 128;
-    for(let t = 0; t < 256; t++){
-      wB += hist[t];
-      if(wB === 0) continue;
-      wF = n - wB;
-      if(wF === 0) break;
-      sumB += t * hist[t];
-      const mB = sumB / wB;
-      const mF = (sum - sumB) / wF;
-      const varBetween = wB * wF * (mB - mF) * (mB - mF);
-      if(varBetween > maxVar){ maxVar = varBetween; threshold = t; }
-    }
+    const bw = new Uint8ClampedArray(n);
+    adaptiveThreshold(gray, w, h, bw);
 
     for(let i = 0, p = 0; i < d.length; i += 4, p++){
-      const v = gray[p] > threshold ? 255 : 0;
-      d[i] = d[i+1] = d[i+2] = v;
+      d[i] = d[i+1] = d[i+2] = bw[p];
     }
     ctx.putImageData(imgData, 0, 0);
     return sharpness;
