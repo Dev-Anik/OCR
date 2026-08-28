@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+<title>Digit Scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
+<style>
+  :root{
+    --bg:#070a09;
+    --panel:#0f1512;
+    --panel-2:#141c18;
+    --line: rgba(76,255,179,0.18);
+    --scan:#4cffb3;
+    --scan-dim: rgba(76,255,179,0.35);
+    --amber:#ffb84c;
+    --amber-dim: rgba(255,184,76,0.25);
+    --ink:#eef4f0;
+    --ink-dim:#8fa39a;
+    --danger:#ff6b6b;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color: transparent;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:var(--bg); color:var(--ink);
+    font-family:'Inter',system-ui,sans-serif;
+    overflow:hidden;
+  }
+  #app{
+    position:relative;
+    width:100%;
+    height:100dvh;
+    height:100vh;
+    display:flex;
+    flex-direction:column;
+    background:#000;
+  }
+
+  /* ---------- Top bar ---------- */
+  .topbar{
+    position:absolute; top:0; left:0; right:0;
+    z-index:30;
+    display:flex; align-items:center; justify-content:space-between;
+    padding: max(14px, env(safe-area-inset-top)) 18px 14px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.65), transparent);
+    pointer-events:none;
+  }
+  .brand{
+    display:flex; align-items:center; gap:8px;
+    font-family:'JetBrains Mono', monospace;
+    font-weight:700; letter-spacing:0.02em;
+    font-size:13px; color:var(--scan);
+    text-transform:uppercase;
+  }
+  .brand .dot{
+    width:7px; height:7px; border-radius:50%;
+    background:var(--scan);
+    box-shadow:0 0 8px var(--scan);
+  }
+  .status-pill{
+    font-family:'JetBrains Mono', monospace;
+    font-size:11px; letter-spacing:0.04em;
+    color:var(--ink-dim);
+    background:rgba(255,255,255,0.06);
+    border:1px solid rgba(255,255,255,0.08);
+    padding:5px 10px; border-radius:20px;
+    transition: color .2s, border-color .2s;
+  }
+  .status-pill.live{ color:var(--scan); border-color:var(--scan-dim); }
+  .status-pill.busy{ color:var(--amber); border-color:var(--amber-dim); }
+
+  /* ---------- Camera layer ---------- */
+  video{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    object-fit:cover;
+    background:#000;
+    filter: contrast(1.05) saturate(0.9);
+  }
+  canvas#work{ display:none; }
+
+  /* ---------- Viewfinder overlay ---------- */
+  .scrim{
+    position:absolute; inset:0; z-index:10;
+    pointer-events:none;
+  }
+  .frame{
+    position:absolute;
+    left:8%; right:8%;
+    top:38%; height:24%;
+    border-radius:14px;
+    box-shadow: 0 0 0 2000px rgba(3,6,5,0.62);
+    transition: box-shadow .25s;
+  }
+  .frame.busy{ box-shadow: 0 0 0 2000px rgba(3,6,5,0.72); }
+  .corner{
+    position:absolute; width:22px; height:22px;
+    border: 3px solid var(--scan);
+    filter: drop-shadow(0 0 4px var(--scan-dim));
+  }
+  .corner.tl{ top:-2px; left:-2px; border-right:none; border-bottom:none; border-top-left-radius:10px;}
+  .corner.tr{ top:-2px; right:-2px; border-left:none; border-bottom:none; border-top-right-radius:10px;}
+  .corner.bl{ bottom:-2px; left:-2px; border-right:none; border-top:none; border-bottom-left-radius:10px;}
+  .corner.br{ bottom:-2px; right:-2px; border-left:none; border-top:none; border-bottom-right-radius:10px;}
+
+  .hint{
+    position:absolute; left:0; right:0; top:calc(38% + 24% + 14px);
+    text-align:center;
+    font-family:'JetBrains Mono', monospace;
+    font-size:11.5px; letter-spacing:0.05em;
+    color:var(--ink-dim);
+    text-transform:uppercase;
+  }
+
+  .scanline{
+    position:absolute; left:0; right:0; top:0;
+    height:2px;
+    background: linear-gradient(90deg, transparent, var(--scan), transparent);
+    box-shadow:0 0 10px 2px var(--scan);
+    opacity:0;
+  }
+  .frame.busy .scanline{
+    opacity:1;
+    animation: sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes sweep{
+    0%{ top:4%; }
+    50%{ top:92%; }
+    100%{ top:4%; }
+  }
+
+  /* ---------- Bottom controls ---------- */
+  .bottombar{
+    position:absolute; left:0; right:0; bottom:0;
+    z-index:30;
+    padding: 18px 18px max(22px, env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; align-items:center; gap:14px;
+    background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
+  }
+  .scan-btn{
+    width:78px; height:78px; border-radius:50%;
+    background: radial-gradient(circle at 35% 30%, #1c2622, var(--panel) 70%);
+    border:3px solid var(--scan);
+    box-shadow: 0 0 0 6px rgba(76,255,179,0.08), 0 0 18px rgba(76,255,179,0.25);
+    color:var(--scan);
+    font-family:'JetBrains Mono', monospace;
+    font-weight:700; font-size:12px; letter-spacing:0.06em;
+    text-transform:uppercase;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    transition: transform .12s ease;
+  }
+  .scan-btn:active{ transform:scale(0.94); }
+  .scan-btn[disabled]{
+    opacity:0.55; cursor:default;
+  }
+  .scan-btn.busy{
+    border-color:var(--amber);
+    color:var(--amber);
+    box-shadow: 0 0 0 6px rgba(255,184,76,0.08), 0 0 18px rgba(255,184,76,0.25);
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse{
+    0%,100%{ box-shadow: 0 0 0 6px rgba(255,184,76,0.08), 0 0 18px rgba(255,184,76,0.25); }
+    50%{ box-shadow: 0 0 0 10px rgba(255,184,76,0.14), 0 0 26px rgba(255,184,76,0.4); }
+  }
+
+  /* ---------- Result readout ---------- */
+  .readout{
+    width:100%; max-width:520px;
+    background:var(--panel);
+    border:1px solid rgba(255,184,76,0.22);
+    border-radius:16px;
+    padding:14px 16px;
+    display:none;
+  }
+  .readout.show{ display:block; }
+  .readout-head{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:8px;
+  }
+  .readout-label{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10.5px; letter-spacing:0.08em;
+    color:var(--ink-dim); text-transform:uppercase;
+  }
+  .copy-btn{
+    font-family:'JetBrains Mono', monospace;
+    font-size:11px; letter-spacing:0.03em;
+    background:transparent; border:1px solid rgba(255,255,255,0.15);
+    color:var(--ink-dim); padding:4px 9px; border-radius:8px;
+    cursor:pointer;
+  }
+  .copy-btn:active{ background:rgba(255,255,255,0.08); }
+  .digits{
+    font-family:'JetBrains Mono', monospace;
+    font-weight:700;
+    font-size:clamp(22px, 6vw, 34px);
+    color:var(--amber);
+    letter-spacing:0.03em;
+    text-shadow: 0 0 14px rgba(255,184,76,0.35);
+    line-height:1.35;
+    word-break:break-all;
+    min-height:1.4em;
+  }
+  .digits.empty{
+    color:var(--ink-dim);
+    font-size:14px; font-weight:500;
+    text-shadow:none;
+  }
+
+  /* ---------- Permission / error screens ---------- */
+  .cover-screen{
+    position:absolute; inset:0; z-index:50;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:16px; padding:32px; text-align:center;
+    background: radial-gradient(circle at 50% 30%, #0d1512, #05070 60%), var(--bg);
+  }
+  .cover-icon{
+    width:56px; height:56px; border-radius:16px;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--panel-2); border:1px solid rgba(255,255,255,0.08);
+    font-size:26px;
+  }
+  .cover-title{ font-size:18px; font-weight:700; }
+  .cover-body{ font-size:13.5px; color:var(--ink-dim); max-width:340px; line-height:1.5; }
+  .primary-btn{
+    margin-top:6px;
+    font-family:'Inter',sans-serif; font-weight:600; font-size:14px;
+    background:var(--scan); color:#04120a;
+    border:none; padding:12px 22px; border-radius:12px;
+    cursor:pointer;
+  }
+  .primary-btn:active{ opacity:0.85; }
+  .hidden{ display:none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="work"></canvas>
+
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Digit Scanner</div>
+    <div class="status-pill" id="statusPill">Starting camera…</div>
+  </div>
+
+  <div class="scrim">
+    <div class="frame" id="frame">
+      <div class="scanline"></div>
+      <div class="corner tl"></div>
+      <div class="corner tr"></div>
+      <div class="corner bl"></div>
+      <div class="corner br"></div>
+    </div>
+    <div class="hint">Align digits inside the frame</div>
+  </div>
+
+  <div class="bottombar">
+    <div class="readout" id="readout">
+      <div class="readout-head">
+        <span class="readout-label">Digits found</span>
+        <button class="copy-btn" id="copyBtn">Copy</button>
+      </div>
+      <div class="digits" id="digitsOut">—</div>
+    </div>
+
+    <button class="scan-btn" id="scanBtn" disabled>Scan</button>
+  </div>
+
+  <!-- Permission request / error overlays -->
+  <div class="cover-screen" id="permScreen">
+    <div class="cover-icon">📷</div>
+    <div class="cover-title">Camera access needed</div>
+    <div class="cover-body">This demo reads digits from your camera feed. Allow camera access to start the live preview.</div>
+    <button class="primary-btn" id="grantBtn">Enable camera</button>
+  </div>
+
+  <div class="cover-screen hidden" id="errorScreen">
+    <div class="cover-icon">⚠️</div>
+    <div class="cover-title" id="errorTitle">Camera unavailable</div>
+    <div class="cover-body" id="errorBody">Camera access was blocked or is unavailable on this device/browser.</div>
+    <button class="primary-btn" id="retryBtn">Try again</button>
+  </div>
+
+</div>
+
+<script>
+(function(){
+  const video = document.getElementById('video');
+  const workCanvas = document.getElementById('work');
+  const scanBtn = document.getElementById('scanBtn');
+  const statusPill = document.getElementById('statusPill');
+  const frameEl = document.getElementById('frame');
+  const readout = document.getElementById('readout');
+  const digitsOut = document.getElementById('digitsOut');
+  const copyBtn = document.getElementById('copyBtn');
+  const permScreen = document.getElementById('permScreen');
+  const errorScreen = document.getElementById('errorScreen');
+  const errorTitle = document.getElementById('errorTitle');
+  const errorBody = document.getElementById('errorBody');
+  const grantBtn = document.getElementById('grantBtn');
+  const retryBtn = document.getElementById('retryBtn');
+
+  let worker = null;
+  let workerReady = false;
+  let stream = null;
+  let busy = false;
+
+  // ---------- Camera setup ----------
+  async function startCamera(){
+    permScreen.classList.add('hidden');
+    errorScreen.classList.add('hidden');
+    statusPill.textContent = 'Starting camera…';
+    statusPill.className = 'status-pill';
+
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
+        audio:false
+      });
+      video.srcObject = stream;
+      await video.play();
+      statusPill.textContent = 'Live';
+      statusPill.className = 'status-pill live';
+      scanBtn.disabled = false;
+      initOcrWorker(); // warm up OCR engine in the background
+    }catch(err){
+      showError(err);
+    }
+  }
+
+  function showError(err){
+    let title = 'Camera unavailable';
+    let body = 'Something went wrong while accessing the camera.';
+    if(err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')){
+      title = 'Permission denied';
+      body = 'Camera access was blocked. Enable it in your browser\'s site settings, then try again.';
+    } else if(err && err.name === 'NotFoundError'){
+      title = 'No camera found';
+      body = 'This device does not appear to have an accessible camera.';
+    } else if(location.protocol !== 'https:' && location.hostname !== 'localhost'){
+      title = 'Secure connection required';
+      body = 'Camera access requires HTTPS (or localhost). Open this page over a secure connection.';
+    }
+    errorTitle.textContent = title;
+    errorBody.textContent = body;
+    errorScreen.classList.remove('hidden');
+    statusPill.textContent = 'Offline';
+    statusPill.className = 'status-pill';
+    scanBtn.disabled = true;
+  }
+
+  grantBtn.addEventListener('click', startCamera);
+  retryBtn.addEventListener('click', startCamera);
+
+  // ---------- OCR worker (created once, reused for speed) ----------
+  async function initOcrWorker(){
+    if(worker) return;
+    try{
+      worker = await Tesseract.createWorker('eng', 1, {
+        // logger left silent; UI shows its own busy state
+      });
+      // Restrict recognizable characters to alphanumeric only (no symbols/punctuation).
+      // This keeps enough context for the engine to segment words correctly while
+      // cutting out noise, which makes it both faster and more accurate than an
+      // unrestricted charset or a digits-only charset (a digits-only whitelist would
+      // force every letter glyph to be misread as the nearest-looking digit).
+      await worker.setParameters({
+        tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+        tessedit_pageseg_mode: '6', // assume a single uniform block of text
+        preserve_interword_spaces: '1'
+      });
+      workerReady = true;
+    }catch(e){
+      console.error('OCR init failed', e);
+    }
+  }
+
+  // ---------- Frame capture (crop to viewfinder + preprocess) ----------
+  function captureFrameCanvas(){
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if(!vw || !vh) return null;
+
+    const videoRect = video.getBoundingClientRect();
+    const frameRect = frameEl.getBoundingClientRect();
+
+    // Map the on-screen viewfinder rectangle back to native video pixel
+    // coordinates, accounting for object-fit:cover cropping/scaling.
+    const videoAspect = vw / vh;
+    const boxAspect = videoRect.width / videoRect.height;
+    let renderW, renderH, offsetX, offsetY;
+    if(videoAspect > boxAspect){
+      renderH = videoRect.height;
+      renderW = renderH * videoAspect;
+      offsetX = (renderW - videoRect.width) / 2;
+      offsetY = 0;
+    } else {
+      renderW = videoRect.width;
+      renderH = renderW / videoAspect;
+      offsetX = 0;
+      offsetY = (renderH - videoRect.height) / 2;
+    }
+    const scale = vw / renderW;
+
+    const relX = (frameRect.left - videoRect.left) + offsetX;
+    const relY = (frameRect.top - videoRect.top) + offsetY;
+
+    let srcX = relX * scale;
+    let srcY = relY * scale;
+    let srcW = frameRect.width * scale;
+    let srcH = frameRect.height * scale;
+
+    // Clamp to video bounds
+    srcX = Math.max(0, Math.min(srcX, vw - 1));
+    srcY = Math.max(0, Math.min(srcY, vh - 1));
+    srcW = Math.max(1, Math.min(srcW, vw - srcX));
+    srcH = Math.max(1, Math.min(srcH, vh - srcY));
+
+    // Upscale small crops so small/far-away text has enough pixels for the
+    // engine to work with. Target a minimum width of ~1000px.
+    const targetW = Math.max(srcW, 1000);
+    const upscale = targetW / srcW;
+    const outW = Math.round(srcW * upscale);
+    const outH = Math.round(srcH * upscale);
+
+    workCanvas.width = outW;
+    workCanvas.height = outH;
+    const ctx = workCanvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
+
+    preprocess(ctx, outW, outH);
+    return workCanvas;
+  }
+
+  // Grayscale + contrast boost + Otsu-style binarization for cleaner OCR input
+  function preprocess(ctx, w, h){
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+    const n = w * h;
+    const gray = new Uint8ClampedArray(n);
+    const hist = new Uint32Array(256);
+
+    for(let i = 0, p = 0; i < d.length; i += 4, p++){
+      const g = (0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]) | 0;
+      gray[p] = g;
+      hist[g]++;
+    }
+
+    // Otsu's method to find an adaptive threshold
+    let sum = 0;
+    for(let t = 0; t < 256; t++) sum += t * hist[t];
+    let sumB = 0, wB = 0, wF = 0, maxVar = 0, threshold = 128;
+    for(let t = 0; t < 256; t++){
+      wB += hist[t];
+      if(wB === 0) continue;
+      wF = n - wB;
+      if(wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB;
+      const mF = (sum - sumB) / wF;
+      const varBetween = wB * wF * (mB - mF) * (mB - mF);
+      if(varBetween > maxVar){ maxVar = varBetween; threshold = t; }
+    }
+
+    for(let i = 0, p = 0; i < d.length; i += 4, p++){
+      const v = gray[p] > threshold ? 255 : 0;
+      d[i] = d[i+1] = d[i+2] = v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  // ---------- Scan action ----------
+  scanBtn.addEventListener('click', async function(){
+    if(busy) return;
+    if(!workerReady){
+      // If the worker hasn't finished warming up yet, wait briefly for it.
+      setBusy(true, 'Preparing…');
+      let waited = 0;
+      while(!workerReady && waited < 8000){
+        await new Promise(r => setTimeout(r, 150));
+        waited += 150;
+      }
+      if(!workerReady){
+        setBusy(false);
+        digitsOut.textContent = 'OCR engine failed to load. Check your connection and retry.';
+        digitsOut.classList.add('empty');
+        readout.classList.add('show');
+        return;
+      }
+    }
+
+    setBusy(true, 'Scanning…');
+    try{
+      const canvas = captureFrameCanvas();
+      if(!canvas){
+        throw new Error('No frame available');
+      }
+      const { data } = await worker.recognize(canvas);
+      const text = data.text || '';
+      const matches = text.match(/\d+/g);
+      showResult(matches ? matches.join('  ') : '');
+    }catch(err){
+      console.error(err);
+      showResult(null, true);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  function setBusy(state, label){
+    busy = state;
+    scanBtn.disabled = state;
+    scanBtn.classList.toggle('busy', state);
+    scanBtn.textContent = state ? '…' : 'Scan';
+    frameEl.classList.toggle('busy', state);
+    if(state){
+      statusPill.textContent = label || 'Working…';
+      statusPill.className = 'status-pill busy';
+    } else if(stream){
+      statusPill.textContent = 'Live';
+      statusPill.className = 'status-pill live';
+    }
+  }
+
+  function showResult(digits, failed){
+    readout.classList.add('show');
+    if(failed){
+      digitsOut.textContent = 'Scan failed — try again with better lighting.';
+      digitsOut.classList.add('empty');
+      return;
+    }
+    if(!digits){
+      digitsOut.textContent = 'No digits detected in frame.';
+      digitsOut.classList.add('empty');
+      return;
+    }
+    digitsOut.classList.remove('empty');
+    digitsOut.textContent = digits;
+  }
+
+  copyBtn.addEventListener('click', function(){
+    const text = digitsOut.textContent;
+    if(!text) return;
+    navigator.clipboard?.writeText(text).then(()=>{
+      const original = copyBtn.textContent;
+      copyBtn.textContent = 'Copied';
+      setTimeout(()=> copyBtn.textContent = original, 1200);
+    }).catch(()=>{});
+  });
+
+  // ---------- Boot ----------
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    showError({ name: 'NotFoundError' });
+  } else {
+    startCamera();
+  }
+
+  window.addEventListener('beforeunload', function(){
+    if(worker) worker.terminate();
+    if(stream) stream.getTracks().forEach(t => t.stop());
+  });
+})();
+</script>
+</body>
+</html>
