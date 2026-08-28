@@ -135,6 +135,24 @@
     margin: 10px 0 4px;
   }
 
+  .focus-ring{
+    position:absolute;
+    width:52px; height:52px;
+    margin-left:-26px; margin-top:-26px;
+    border:2px solid var(--scan);
+    border-radius:50%;
+    pointer-events:none;
+    opacity:0;
+  }
+  .focus-ring.show{
+    opacity:1;
+    animation: focusPulse 0.6s ease-out;
+  }
+  @keyframes focusPulse{
+    0%{ transform:scale(1.4); opacity:1; }
+    100%{ transform:scale(1); opacity:0; }
+  }
+
   /* ---------- Controls ---------- */
   .controls{
     display:flex; justify-content:center;
@@ -245,9 +263,10 @@
       <span class="mark-label">Scan area</span>
       <div class="scanline"></div>
     </div>
+    <div class="focus-ring" id="focusRing"></div>
   </div>
 
-  <div class="hint">Fit 2–3 lines of digits inside the red box</div>
+  <div class="hint">Fit 2–3 lines of digits in the box · tap preview to focus · keep ~10–15cm back</div>
 
   <div class="controls">
     <button class="scan-btn" id="scanBtn" disabled>Scan</button>
@@ -285,6 +304,8 @@
   const scanBtn = document.getElementById('scanBtn');
   const statusPill = document.getElementById('statusPill');
   const markEl = document.getElementById('mark');
+  const cameraWrap = document.querySelector('.camera-wrap');
+  const focusRing = document.getElementById('focusRing');
   const readout = document.getElementById('readout');
   const digitsOut = document.getElementById('digitsOut');
   const copyBtn = document.getElementById('copyBtn');
@@ -298,6 +319,7 @@
   let worker = null;
   let workerReady = false;
   let stream = null;
+  let track = null;
   let busy = false;
 
   // ---------- Camera setup ----------
@@ -312,15 +334,21 @@
         video: {
           facingMode: { ideal: 'environment' },
           width: { ideal: 1920 },
-          height: { ideal: 1080 }
+          height: { ideal: 1080 },
+          // Ask for continuous autofocus where the browser/device supports it.
+          // Close-up text is exactly where fixed/slow focus causes blur, so we
+          // also offer tap-to-focus below as a fallback (see setupTapToFocus).
+          advanced: [{ focusMode: 'continuous' }]
         },
         audio:false
       });
       video.srcObject = stream;
+      track = stream.getVideoTracks()[0];
       await video.play();
       statusPill.textContent = 'Live';
       statusPill.className = 'status-pill live';
       scanBtn.disabled = false;
+      setupTapToFocus();
       initOcrWorker(); // warm up OCR engine in the background
     }catch(err){
       showError(err);
@@ -350,6 +378,44 @@
 
   grantBtn.addEventListener('click', startCamera);
   retryBtn.addEventListener('click', startCamera);
+
+  // ---------- Tap-to-focus ----------
+  // Phone cameras (especially the main rear lens) often can't autofocus fast
+  // enough when the device is moved close to text. Letting the person tap the
+  // preview to force a refocus at that point fixes most "close-up doesn't
+  // work" cases. Falls back silently on devices/browsers that don't expose
+  // focus constraints (e.g. iOS Safari).
+  function setupTapToFocus(){
+    cameraWrap.addEventListener('click', async function(e){
+      const rect = cameraWrap.getBoundingClientRect();
+      const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+
+      focusRing.style.left = (e.clientX - rect.left) + 'px';
+      focusRing.style.top = (e.clientY - rect.top) + 'px';
+      focusRing.classList.remove('show');
+      void focusRing.offsetWidth; // restart animation
+      focusRing.classList.add('show');
+
+      if(!track) return;
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      try{
+        if(caps.pointsOfInterest){
+          await track.applyConstraints({ advanced: [{ pointsOfInterest: [{ x, y }] }] });
+        }
+        if(caps.focusMode && caps.focusMode.includes('single-shot')){
+          await track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] });
+          setTimeout(() => {
+            if(caps.focusMode.includes('continuous')){
+              track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{});
+            }
+          }, 800);
+        }
+      }catch(err){
+        // Not supported on this device/browser — no-op.
+      }
+    });
+  }
 
   // ---------- OCR worker (created once, reused for speed) ----------
   async function initOcrWorker(){
@@ -426,8 +492,27 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
 
-    preprocess(ctx, outW, outH);
-    return workCanvas;
+    const sharpness = preprocess(ctx, outW, outH);
+    return { canvas: workCanvas, sharpness };
+  }
+
+  // Quick sharpness estimate using the variance of a Laplacian-style edge
+  // filter. Very close, out-of-focus shots produce a low variance (soft,
+  // low-contrast edges) — catching that up front avoids running OCR on
+  // useless input and lets us tell the person exactly what to fix.
+  function estimateSharpness(gray, w, h){
+    let sum = 0, sumSq = 0, count = 0;
+    for(let y = 1; y < h - 1; y += 2){       // sample every other row/col for speed
+      for(let x = 1; x < w - 1; x += 2){
+        const i = y * w + x;
+        const lap = (gray[i-1] + gray[i+1] + gray[i-w] + gray[i+w]) - 4 * gray[i];
+        sum += lap;
+        sumSq += lap * lap;
+        count++;
+      }
+    }
+    const mean = sum / count;
+    return (sumSq / count) - (mean * mean); // variance of the Laplacian
   }
 
   // Grayscale + Otsu-style adaptive binarization for cleaner OCR input
@@ -443,6 +528,8 @@
       gray[p] = g;
       hist[g]++;
     }
+
+    const sharpness = estimateSharpness(gray, w, h);
 
     let sum = 0;
     for(let t = 0; t < 256; t++) sum += t * hist[t];
@@ -464,6 +551,7 @@
       d[i] = d[i+1] = d[i+2] = v;
     }
     ctx.putImageData(imgData, 0, 0);
+    return sharpness;
   }
 
   // ---------- Scan action ----------
@@ -487,11 +575,18 @@
 
     setBusy(true, 'Scanning…');
     try{
-      const canvas = captureFrameCanvas();
-      if(!canvas){
+      const captured = captureFrameCanvas();
+      if(!captured){
         throw new Error('No frame available');
       }
-      const { data } = await worker.recognize(canvas);
+      // Below this, the image is too soft for OCR to trust — almost always
+      // caused by being closer than the camera's minimum focus distance.
+      // Skip the (slow) OCR pass and tell the person exactly what to change.
+      if(captured.sharpness < 12){
+        showResult(null, false, true);
+        return;
+      }
+      const { data } = await worker.recognize(captured.canvas);
       const text = data.text || '';
       const matches = text.match(/\d+/g);
       showResult(matches ? matches.join('  ') : '');
@@ -518,8 +613,13 @@
     }
   }
 
-  function showResult(digits, failed){
+  function showResult(digits, failed, blurry){
     readout.classList.add('show');
+    if(blurry){
+      digitsOut.textContent = 'Too blurry to read — move back a little (10–15cm), or tap the preview to refocus.';
+      digitsOut.classList.add('empty');
+      return;
+    }
     if(failed){
       digitsOut.textContent = 'Scan failed — try again with better lighting.';
       digitsOut.classList.add('empty');
