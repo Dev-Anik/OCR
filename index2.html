@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Fast Digits OCR</title>
+  <title>Accurate Digits OCR</title>
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -25,9 +25,19 @@
       background: #000;
       display: block;
     }
-    .controls {
-      margin: 1rem 0;
+    /* Visual target guide box for user aiming */
+    .scan-box {
+      position: absolute;
+      top: 30%;
+      left: 15%;
+      width: 70%;
+      height: 40%;
+      border: 2px dashed #00ff66;
+      border-radius: 8px;
+      box-sizing: border-box;
+      pointer-events: none;
     }
+    .controls { margin: 1rem 0; }
     button {
       padding: 12px 24px;
       font-size: 1rem;
@@ -38,9 +48,7 @@
       color: #fff;
       cursor: pointer;
     }
-    button:disabled {
-      background: #555;
-    }
+    button:disabled { background: #555; }
     #result {
       margin-top: 10px;
       font-size: 1.5rem;
@@ -48,6 +56,7 @@
       color: #00ff66;
       min-height: 2rem;
     }
+    .invalid { color: #ff4d4d !important; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
@@ -55,10 +64,11 @@
 
   <div class="video-container">
     <video id="webcam" autoplay playsinline></video>
+    <div class="scan-box"></div>
   </div>
 
   <div class="controls">
-    <button id="ocr-btn" disabled>Initializing Engine...</button>
+    <button id="ocr-btn" disabled>Loading Engine...</button>
   </div>
 
   <div>Extracted Digits:</div>
@@ -70,62 +80,86 @@
     const resultDiv = document.getElementById('result');
     let worker = null;
 
-    // Off-screen canvas to process captured video frame
     const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    // 1. Initialize Web Worker and constrain output strictly to Digits
     async function initOCR() {
       worker = await Tesseract.createWorker('eng');
+      // Set single line mode for cleaner digit parsing
       await worker.setParameters({
-        tessedit_char_whitelist: '0123456789', // Strict digit filtering
+        tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
       });
       ocrBtn.disabled = false;
       ocrBtn.textContent = 'Scan Digits';
     }
 
-    // 2. Request Mobile Camera Stream
     async function initCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            facingMode: { ideal: 'environment' }, // Prefers back camera
-            width: { ideal: 640 }                 // Keeps resolution manageable for low-end mobile
-          },
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
           audio: false
         });
         video.srcObject = stream;
       } catch (err) {
-        alert('Camera access denied or unassigned: ' + err.message);
+        alert('Camera error: ' + err.message);
       }
     }
 
-    // 3. Perform Snapshot & OCR without interrupting video
+    // Image Preprocessing: Grayscale & High Contrast Binarization
+    function preprocessImage(canvasContext, width, height) {
+      const imgData = canvasContext.getImageData(0, 0, width, height);
+      const data = imgData.data;
+      
+      for (let i = 0; i < data.length; i += 4) {
+        // Calculate grayscale luminosity
+        const avg = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        // Apply crisp black & white threshold (removes background noise)
+        const threshold = avg > 120 ? 255 : 0;
+        data[i] = data[i + 1] = data[i + 2] = threshold;
+      }
+      canvasContext.putImageData(imgData, 0, 0);
+    }
+
     ocrBtn.addEventListener('click', async () => {
       if (!worker) return;
 
       ocrBtn.disabled = true;
+      resultDiv.className = '';
       resultDiv.textContent = 'Scanning...';
 
-      // Capture frame at low resolution for maximum speed on mobile CPU/GPU
-      const targetWidth = 400; 
-      const scale = targetWidth / video.videoWidth;
-      canvas.width = targetWidth;
-      canvas.height = video.videoHeight * scale;
+      // Crop canvas to match the scan-box target area for speed & focus
+      const boxWidth = video.videoWidth * 0.7;
+      const boxHeight = video.videoHeight * 0.4;
+      const startX = video.videoWidth * 0.15;
+      const startY = video.videoHeight * 0.3;
 
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.width = boxWidth;
+      canvas.height = boxHeight;
 
-      // Perform OCR asynchronously on worker thread (UI stays 60fps)
-      const { data: { text } } = await worker.recognize(canvas);
+      // Draw cropped area to off-screen canvas
+      ctx.drawImage(video, startX, startY, boxWidth, boxHeight, 0, 0, boxWidth, boxHeight);
+      
+      // Enhance image for mobile OCR accuracy
+      preprocessImage(ctx, canvas.width, canvas.height);
 
-      // Clean string of any unintended whitespace
-      const cleanDigits = text.replace(/\D/g, '');
-      resultDiv.textContent = cleanDigits.length ? cleanDigits : 'No digits found';
+      const { data } = await worker.recognize(canvas);
+      const rawText = data.text.trim();
+      
+      // Validation Check: Ensure text contains actual digits and passed confidence checks
+      const containsNonDigits = /[a-zA-Z]/.test(rawText);
+      const digitsOnly = rawText.replace(/\D/g, '');
+
+      // Reject if non-numeric characters detected, confidence is low, or no digits were found
+      if (containsNonDigits || digitsOnly.length === 0 || data.confidence < 60) {
+        resultDiv.textContent = 'Invalid Data';
+        resultDiv.className = 'invalid';
+      } else {
+        resultDiv.textContent = digitsOnly;
+      }
 
       ocrBtn.disabled = false;
     });
 
-    // Run Initializations
     initCamera();
     initOCR();
   </script>
