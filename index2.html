@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Accurate Digits OCR</title>
+  <title>Accurate Line OCR</title>
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -18,25 +18,39 @@
       position: relative;
       width: 100%;
       max-width: 480px;
+      /* Ensure the container maintains aspect ratio */
+      aspect-ratio: 4 / 3; 
+      background: #000;
+      overflow: hidden;
     }
     video {
       width: 100%;
-      height: auto;
-      background: #000;
+      height: 100%;
+      object-fit: cover; /* Ensures video fills container without stretching */
       display: block;
     }
-    /* Visual target guide box for user aiming */
-    .scan-box {
+    
+    /* THE RED SCANNING LINE AREA */
+    .scan-line-gate {
       position: absolute;
-      top: 30%;
-      left: 15%;
-      width: 70%;
-      height: 40%;
-      border: 2px dashed #00ff66;
-      border-radius: 8px;
+      /* Centered vertically and horizontally */
+      top: 50%;
+      left: 10%;
+      /* Wide but very thin */
+      width: 80%;
+      height: 40px; /* One line height */
+      /* Visual style */
+      border: 2px solid #ff4d4d;
+      border-radius: 4px;
+      box-shadow: 0 0 10px rgba(255, 77, 77, 0.5);
+      
+      /* Center alignment transform */
+      transform: translateY(-50%);
       box-sizing: border-box;
-      pointer-events: none;
+      pointer-events: none; /* Let clicks pass through to video/buttons */
+      z-index: 10;
     }
+
     .controls { margin: 1rem 0; }
     button {
       padding: 12px 24px;
@@ -51,10 +65,13 @@
     button:disabled { background: #555; }
     #result {
       margin-top: 10px;
-      font-size: 1.5rem;
+      font-size: 1.8rem;
       font-weight: bold;
       color: #00ff66;
-      min-height: 2rem;
+      min-height: 2.2rem;
+      background: rgba(255,255,255,0.1);
+      padding: 10px 20px;
+      border-radius: 8px;
     }
     .invalid { color: #ff4d4d !important; }
   </style>
@@ -64,14 +81,14 @@
 
   <div class="video-container">
     <video id="webcam" autoplay playsinline></video>
-    <div class="scan-box"></div>
+    <!-- The targeted scanning area -->
+    <div class="scan-line-gate"></div>
   </div>
 
   <div class="controls">
-    <button id="ocr-btn" disabled>Loading Engine...</button>
+    <button id="ocr-btn" disabled>Loading...</button>
   </div>
 
-  <div>Extracted Digits:</div>
   <div id="result">--</div>
 
   <script>
@@ -80,17 +97,19 @@
     const resultDiv = document.getElementById('result');
     let worker = null;
 
+    // The preprocessing canvas
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
     async function initOCR() {
       worker = await Tesseract.createWorker('eng');
-      // Set single line mode for cleaner digit parsing
+      // Force single-line mode for max accuracy in the thin gate
       await worker.setParameters({
         tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+        tessedit_char_whitelist: '0123456789', // Optional: Keep this if you ONLY want digits
       });
       ocrBtn.disabled = false;
-      ocrBtn.textContent = 'Scan Digits';
+      ocrBtn.textContent = 'Scan Red Area';
     }
 
     async function initCamera() {
@@ -100,61 +119,86 @@
           audio: false
         });
         video.srcObject = stream;
+        
+        // Ensure canvas matches the video aspect ratio when metadata loads
+        video.onloadedmetadata = () => {
+          console.log(`Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+        };
       } catch (err) {
         alert('Camera error: ' + err.message);
       }
     }
 
-    // Image Preprocessing: Grayscale & High Contrast Binarization
+    // Image Preprocessing Filter (unchanged)
     function preprocessImage(canvasContext, width, height) {
       const imgData = canvasContext.getImageData(0, 0, width, height);
       const data = imgData.data;
-      
       for (let i = 0; i < data.length; i += 4) {
-        // Calculate grayscale luminosity
         const avg = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        // Apply crisp black & white threshold (removes background noise)
-        const threshold = avg > 120 ? 255 : 0;
+        const threshold = avg > 130 ? 255 : 0; // Slightly higher threshold
         data[i] = data[i + 1] = data[i + 2] = threshold;
       }
       canvasContext.putImageData(imgData, 0, 0);
     }
 
     ocrBtn.addEventListener('click', async () => {
-      if (!worker) return;
+      if (!worker || video.readyState !== 4) return;
 
       ocrBtn.disabled = true;
       resultDiv.className = '';
-      resultDiv.textContent = 'Scanning...';
+      resultDiv.textContent = 'Processing...';
 
-      // Crop canvas to match the scan-box target area for speed & focus
-      const boxWidth = video.videoWidth * 0.7;
-      const boxHeight = video.videoHeight * 0.4;
-      const startX = video.videoWidth * 0.15;
-      const startY = video.videoHeight * 0.3;
-
-      canvas.width = boxWidth;
-      canvas.height = boxHeight;
-
-      // Draw cropped area to off-screen canvas
-      ctx.drawImage(video, startX, startY, boxWidth, boxHeight, 0, 0, boxWidth, boxHeight);
+      // 1. CALCULATE CROP COORDINATES
+      // We need to map the CSS coordinates (.scan-line-gate) 
+      // back to the actual video pixel dimensions.
       
-      // Enhance image for mobile OCR accuracy
+      const vWidth = video.videoWidth;
+      const vHeight = video.videoHeight;
+      
+      // These percentages MUST match the .scan-line-gate CSS
+      const gateWidthPercent = 0.80;  // 80%
+      const gateHeightPxCSS = 40;     // 40px height in CSS
+      const gateLeftPercent = 0.10;  // 10%
+      
+      // Calculate the display height of the video container (to find the scaling factor)
+      const displayHeight = video.clientHeight;
+      const scaleFactor = vHeight / displayHeight;
+      
+      // Map the 40px CSS height to actual video pixels
+      const gateHeightVideoPixels = gateHeightPxCSS * scaleFactor;
+      
+      const cropX = vWidth * gateLeftPercent;
+      const cropY = (vHeight / 2) - (gateHeightVideoPixels / 2); // Centered vertically
+      const cropWidth = vWidth * gateWidthPercent;
+      const cropHeight = gateHeightVideoPixels;
+
+      // 2. SET CANVAS SIZE TO MATCH THE THIN GATE
+      canvas.width = cropWidth;
+      canvas.height = cropHeight;
+
+      // 3. DRAW ONLY THE RED AREA PIXELS
+      ctx.drawImage(
+        video, 
+        cropX, cropY, cropWidth, cropHeight, // Source (the video frame)
+        0, 0, cropWidth, cropHeight          // Destination (the small canvas)
+      );
+      
+      // 4. ENHANCE (Grayscale/Binarize)
       preprocessImage(ctx, canvas.width, canvas.height);
 
+      // 5. OCR THE TINY IMAGE
       const { data } = await worker.recognize(canvas);
-      const rawText = data.text.trim();
       
-      // Validation Check: Ensure text contains actual digits and passed confidence checks
-      const containsNonDigits = /[a-zA-Z]/.test(rawText);
-      const digitsOnly = rawText.replace(/\D/g, '');
+      // Clean result (optional, depends if you kept whitelist active)
+      const resultText = data.text.trim().replace(/\D/g, '');
 
-      // Reject if non-numeric characters detected, confidence is low, or no digits were found
-      if (containsNonDigits || digitsOnly.length === 0 || data.confidence < 60) {
+      // 6. VALIDATE AND SHOW OUTPUT
+      // Since the image is so small, Tesseract is very fast.
+      if (resultText.length === 0 || data.confidence < 50) {
         resultDiv.textContent = 'Invalid Data';
         resultDiv.className = 'invalid';
       } else {
-        resultDiv.textContent = digitsOnly;
+        resultDiv.textContent = resultText;
       }
 
       ocrBtn.disabled = false;
