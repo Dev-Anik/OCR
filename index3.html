@@ -222,6 +222,52 @@
     text-shadow:none;
   }
 
+  /* ---------- Debug panel ---------- */
+  .debug-toggle{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10.5px; letter-spacing:0.03em;
+    background:transparent; border:1px solid rgba(255,255,255,0.15);
+    color:var(--ink-dim); padding:5px 9px; border-radius:8px;
+    cursor:pointer;
+  }
+  .debug-toggle.active{ color:var(--scan); border-color:var(--scan-dim); }
+  .debug-panel{
+    display:none;
+    margin-top:12px;
+    background:var(--panel);
+    border:1px solid rgba(255,255,255,0.08);
+    border-radius:16px;
+    padding:14px 16px;
+  }
+  .debug-panel.show{ display:block; }
+  .debug-row{
+    display:flex; justify-content:space-between;
+    font-family:'JetBrains Mono', monospace;
+    font-size:11.5px; color:var(--ink-dim);
+    margin-bottom:6px;
+  }
+  .debug-row span:last-child{ color:var(--ink); }
+  .debug-label{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; letter-spacing:0.05em; text-transform:uppercase;
+    color:var(--ink-dim); margin:10px 0 6px;
+  }
+  .debug-thumb{
+    width:100%; border-radius:8px;
+    border:1px solid rgba(255,255,255,0.1);
+    background:#000;
+  }
+  .debug-raw{
+    font-family:'JetBrains Mono', monospace;
+    font-size:11px; color:var(--ink);
+    background:rgba(0,0,0,0.3);
+    border-radius:8px;
+    padding:8px 10px;
+    white-space:pre-wrap; word-break:break-all;
+    margin:0;
+    max-height:120px; overflow-y:auto;
+  }
+
   /* ---------- Permission / error screens ---------- */
   .cover-screen{
     position:fixed; inset:0; z-index:50;
@@ -252,8 +298,11 @@
 <div class="card">
 
   <div class="header">
-    <div class="brand"><span class="dot"></span> Digit Scanner</div>
-    <div class="status-pill" id="statusPill">Starting camera…</div>
+    <div class="brand"><span class="dot"></span> Digit Scanner v3</div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button class="debug-toggle" id="debugToggle" type="button">Debug</button>
+      <div class="status-pill" id="statusPill">Starting camera…</div>
+    </div>
   </div>
 
   <div class="camera-wrap">
@@ -278,6 +327,15 @@
       <button class="copy-btn" id="copyBtn">Copy</button>
     </div>
     <div class="digits" id="digitsOut">—</div>
+  </div>
+
+  <div class="debug-panel" id="debugPanel">
+    <div class="debug-row"><span>Sharpness score</span><span id="debugSharpness">—</span></div>
+    <div class="debug-row"><span>Preprocessing used</span><span id="debugPass">—</span></div>
+    <div class="debug-label">Exactly what OCR saw</div>
+    <img class="debug-thumb" id="debugThumb" alt="processed crop sent to OCR">
+    <div class="debug-label">Raw OCR text (before digit filter)</div>
+    <pre class="debug-raw" id="debugRaw">—</pre>
   </div>
 
 </div>
@@ -309,6 +367,12 @@
   const readout = document.getElementById('readout');
   const digitsOut = document.getElementById('digitsOut');
   const copyBtn = document.getElementById('copyBtn');
+  const debugToggle = document.getElementById('debugToggle');
+  const debugPanel = document.getElementById('debugPanel');
+  const debugSharpness = document.getElementById('debugSharpness');
+  const debugPass = document.getElementById('debugPass');
+  const debugThumb = document.getElementById('debugThumb');
+  const debugRaw = document.getElementById('debugRaw');
   const permScreen = document.getElementById('permScreen');
   const errorScreen = document.getElementById('errorScreen');
   const errorTitle = document.getElementById('errorTitle');
@@ -379,6 +443,11 @@
   grantBtn.addEventListener('click', startCamera);
   retryBtn.addEventListener('click', startCamera);
 
+  debugToggle.addEventListener('click', function(){
+    const show = debugPanel.classList.toggle('show');
+    debugToggle.classList.toggle('active', show);
+  });
+
   // ---------- Tap-to-focus ----------
   // Phone cameras (especially the main rear lens) often can't autofocus fast
   // enough when the device is moved close to text. Letting the person tap the
@@ -440,8 +509,8 @@
     }
   }
 
-  // ---------- Frame capture (crop to the red-marked area + preprocess) ----------
-  function captureFrameCanvas(){
+  // ---------- Frame capture geometry (crop to the red-marked area) ----------
+  function computeCropGeometry(){
     const vw = video.videoWidth, vh = video.videoHeight;
     if(!vw || !vh) return null;
 
@@ -474,34 +543,64 @@
     let srcW = markRect.width * scale;
     let srcH = markRect.height * scale;
 
-    // Clamp to video bounds
     srcX = Math.max(0, Math.min(srcX, vw - 1));
     srcY = Math.max(0, Math.min(srcY, vh - 1));
     srcW = Math.max(1, Math.min(srcW, vw - srcX));
     srcH = Math.max(1, Math.min(srcH, vh - srcY));
 
     // Upscale small crops so small/far-away text has enough pixels for the
-    // engine to work with. Target a minimum width of ~1000px.
+    // engine to work with.
     const targetW = Math.max(srcW, 1200);
     const upscale = targetW / srcW;
     const outW = Math.round(srcW * upscale);
     const outH = Math.round(srcH * upscale);
 
-    workCanvas.width = outW;
-    workCanvas.height = outH;
+    return { srcX, srcY, srcW, srcH, outW, outH };
+  }
+
+  function rgbaToGray(data, n){
+    const gray = new Uint8ClampedArray(n);
+    for(let i = 0, p = 0; p < n; i += 4, p++){
+      gray[p] = (0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]) | 0;
+    }
+    return gray;
+  }
+
+  // Grabs a short burst of frames from the same crop region and keeps the
+  // sharpest one. A single close-up shot is very often blurry — either the
+  // camera hasn't finished autofocusing yet or the hand moved slightly — so
+  // sampling a few frames a beat apart and picking the best is far more
+  // reliable than trusting whatever frame happened to be on screen the
+  // instant the button was tapped. This is the main fix for "fails more up
+  // close": it's rarely that close-up is impossible, just that any single
+  // frame close-up has much less margin for error.
+  async function captureBestFrame(attempts = 4, delayMs = 70){
+    const geo = computeCropGeometry();
+    if(!geo) return null;
+
+    workCanvas.width = geo.outW;
+    workCanvas.height = geo.outH;
     const ctx = workCanvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
 
-    const sharpness = preprocess(ctx, outW, outH);
-    return { canvas: workCanvas, sharpness };
+    let best = null;
+    for(let i = 0; i < attempts; i++){
+      ctx.drawImage(video, geo.srcX, geo.srcY, geo.srcW, geo.srcH, 0, 0, geo.outW, geo.outH);
+      const imgData = ctx.getImageData(0, 0, geo.outW, geo.outH);
+      const gray = rgbaToGray(imgData.data, geo.outW * geo.outH);
+      const sharpness = estimateSharpness(gray, geo.outW, geo.outH);
+      if(!best || sharpness > best.sharpness){
+        best = { gray, sharpness, w: geo.outW, h: geo.outH };
+      }
+      if(i < attempts - 1) await new Promise(r => setTimeout(r, delayMs));
+    }
+    return best;
   }
 
   // Quick sharpness estimate using the variance of a Laplacian-style edge
-  // filter. Very close, out-of-focus shots produce a low variance (soft,
-  // low-contrast edges) — catching that up front avoids running OCR on
-  // useless input and lets us tell the person exactly what to fix.
+  // filter. Low variance means soft, low-contrast edges — typically an
+  // out-of-focus or motion-blurred shot.
   function estimateSharpness(gray, w, h){
     let sum = 0, sumSq = 0, count = 0;
     for(let y = 1; y < h - 1; y += 2){       // sample every other row/col for speed
@@ -514,18 +613,13 @@
       }
     }
     const mean = sum / count;
-    return (sumSq / count) - (mean * mean); // variance of the Laplacian
+    return (sumSq / count) - (mean * mean);
   }
 
-  // Local adaptive thresholding (Bradley/Wellner method) instead of a single
-  // global threshold. A global threshold (e.g. Otsu) breaks down under the
-  // uneven lighting typical of a handheld phone shot — shadows, glare, or a
-  // brightness gradient across the crop can wash out or blacken whole
-  // sections of text and was very likely the main cause of inconsistent
-  // results. Adaptive thresholding compares each pixel to the *local*
-  // average brightness around it instead, so it holds up much better across
-  // an unevenly lit frame — it's the same core technique real document-
-  // scanner apps use.
+  // Local adaptive thresholding (Bradley/Wellner method). Compares each
+  // pixel to the local average brightness around it instead of one global
+  // cutoff, so it holds up much better under the uneven lighting typical of
+  // a handheld phone shot (shadows, glare, brightness gradients).
   function adaptiveThreshold(gray, w, h, out){
     const integral = new Float64Array((w + 1) * (h + 1));
     for(let y = 0; y < h; y++){
@@ -540,7 +634,7 @@
 
     const windowSize = Math.max(15, Math.round(w / 8));
     const half = windowSize >> 1;
-    const t = 0.15; // sensitivity: pixel must be this much brighter than local mean to count as background
+    const t = 0.15;
 
     for(let y = 0; y < h; y++){
       const y1 = Math.max(0, y - half);
@@ -561,27 +655,47 @@
     }
   }
 
-  // Grayscale conversion + adaptive binarization for cleaner OCR input
-  function preprocess(ctx, w, h){
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const d = imgData.data;
-    const n = w * h;
-    const gray = new Uint8ClampedArray(n);
-
-    for(let i = 0, p = 0; i < d.length; i += 4, p++){
-      gray[p] = (0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]) | 0;
+  // Second preprocessing option: contrast-stretch only, no hard black/white
+  // cutoff. A hard threshold can occasionally clip away faint strokes that
+  // Tesseract's own internal binarization would still pick up — trying both
+  // and keeping whichever actually finds digits raises the odds of a
+  // correct read instead of betting everything on one method.
+  function contrastStretch(gray, w, h, out){
+    let min = 255, max = 0;
+    for(let i = 0; i < gray.length; i++){
+      if(gray[i] < min) min = gray[i];
+      if(gray[i] > max) max = gray[i];
     }
+    const range = Math.max(1, max - min);
+    for(let i = 0; i < gray.length; i++){
+      out[i] = ((gray[i] - min) * 255) / range;
+    }
+  }
 
-    const sharpness = estimateSharpness(gray, w, h);
-
-    const bw = new Uint8ClampedArray(n);
-    adaptiveThreshold(gray, w, h, bw);
-
-    for(let i = 0, p = 0; i < d.length; i += 4, p++){
-      d[i] = d[i+1] = d[i+2] = bw[p];
+  function grayToCanvas(gray, w, h, canvas){
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(w, h);
+    const d = imgData.data;
+    for(let i = 0, p = 0; p < gray.length; i += 4, p++){
+      d[i] = d[i+1] = d[i+2] = gray[p];
+      d[i+3] = 255;
     }
     ctx.putImageData(imgData, 0, 0);
-    return sharpness;
+  }
+
+  async function runOcrPass(gray, w, h){
+    grayToCanvas(gray, w, h, workCanvas);
+    const { data } = await worker.recognize(workCanvas);
+    return { text: data.text || '', confidence: data.confidence || 0 };
+  }
+
+  function updateDebugPanel(sharpness, passUsed, rawText){
+    debugSharpness.textContent = sharpness.toFixed(1);
+    debugPass.textContent = passUsed;
+    debugRaw.textContent = rawText && rawText.trim() ? rawText : '(empty)';
+    try{ debugThumb.src = workCanvas.toDataURL(); }catch(e){}
   }
 
   // ---------- Scan action ----------
@@ -605,21 +719,45 @@
 
     setBusy(true, 'Scanning…');
     try{
-      const captured = captureFrameCanvas();
-      if(!captured){
+      const frame = await captureBestFrame();
+      if(!frame){
         throw new Error('No frame available');
       }
-      // Below this, the image is too soft for OCR to trust — almost always
-      // caused by being closer than the camera's minimum focus distance.
-      // Skip the (slow) OCR pass and tell the person exactly what to change.
-      if(captured.sharpness < 12){
-        showResult(null, false, true);
-        return;
+      const n = frame.w * frame.h;
+
+      const binary = new Uint8ClampedArray(n);
+      adaptiveThreshold(frame.gray, frame.w, frame.h, binary);
+
+      // Pass 1: adaptively-binarized image.
+      let result = await runOcrPass(binary, frame.w, frame.h);
+      let usedPass = 'binarized';
+      let matches = result.text.match(/\d+/g);
+
+      // Pass 2 (fallback): plain contrast-enhanced grayscale, letting
+      // Tesseract's own internal binarization handle thresholding instead.
+      // Only run if pass 1 came back with no digits — keeps the common case
+      // fast while still giving a second chance when the first guess misses.
+      if(!matches || matches.join('').length === 0){
+        const enhanced = new Uint8ClampedArray(n);
+        contrastStretch(frame.gray, frame.w, frame.h, enhanced);
+        const result2 = await runOcrPass(enhanced, frame.w, frame.h);
+        const matches2 = result2.text.match(/\d+/g);
+        if(matches2 && matches2.join('').length > 0){
+          result = result2;
+          matches = matches2;
+          usedPass = 'grayscale (fallback)';
+        }
       }
-      const { data } = await worker.recognize(captured.canvas);
-      const text = data.text || '';
-      const matches = text.match(/\d+/g);
-      showResult(matches ? matches.join('  ') : '');
+
+      updateDebugPanel(frame.sharpness, usedPass, result.text);
+
+      if(matches && matches.join('').length > 0){
+        showResult(matches.join('  '));
+      } else if(frame.sharpness < 12){
+        showResult(null, false, true);
+      } else {
+        showResult('');
+      }
     }catch(err){
       console.error(err);
       showResult(null, true);
