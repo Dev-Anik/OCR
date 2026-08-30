@@ -298,7 +298,7 @@
 <div class="card">
 
   <div class="header">
-    <div class="brand"><span class="dot"></span> Digit Scanner v4</div>
+    <div class="brand"><span class="dot"></span> Digit Scanner v5</div>
     <div style="display:flex; align-items:center; gap:8px;">
       <button class="debug-toggle" id="debugToggle" type="button">Debug</button>
       <div class="status-pill" id="statusPill">Starting camera…</div>
@@ -510,7 +510,11 @@
       // slashes in real-world text don't get force-mapped into stray digits.
       await worker.setParameters({
         tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,:-/',
-        tessedit_pageseg_mode: '6', // assume a single uniform block of text
+        // Sparse-text mode instead of "uniform block": our crop is a loose
+        // strip of digit lines, not a structured paragraph, and block mode's
+        // layout analysis was the likely cause of returning nothing at all
+        // on otherwise perfectly legible captures.
+        tessedit_pageseg_mode: '11',
         preserve_interword_spaces: '1',
         // Tesseract's layout/feature heuristics are calibrated around a
         // notion of DPI. Camera crops don't have a real DPI, but telling it
@@ -565,7 +569,15 @@
 
     // Upscale small crops so small/far-away text has enough pixels for the
     // engine to work with.
-    const targetW = Math.max(srcW, 1200);
+    // Only upscale genuinely small/far-away crops. Previously this always
+    // forced at least 1200px wide regardless of source size, which could
+    // blow already-adequate text up into oversized, thick glyphs — and
+    // Tesseract's layout analysis can mistake abnormally large glyphs for
+    // graphics rather than text, causing it to find no text at all (not
+    // just misread it — return nothing).
+    let targetW = srcW;
+    if(srcW < 700) targetW = 900;
+    else if(srcW > 1600) targetW = 1600; // cap very large crops too, for speed
     const upscale = targetW / srcW;
     const outW = Math.round(srcW * upscale);
     const outH = Math.round(srcH * upscale);
@@ -700,7 +712,7 @@
     ctx.putImageData(imgData, 0, 0);
   }
 
-  let currentPsm = '6';
+  let currentPsm = '11';
   async function runOcrPass(gray, w, h, psm){
     if(psm && psm !== currentPsm){
       await worker.setParameters({ tessedit_pageseg_mode: psm });
@@ -748,24 +760,37 @@
       const binary = new Uint8ClampedArray(n);
       adaptiveThreshold(frame.gray, frame.w, frame.h, binary);
 
-      // Pass 1: adaptively-binarized image.
-      let result = await runOcrPass(binary, frame.w, frame.h);
-      let usedPass = 'binarized';
+      // Pass 1: adaptively-binarized image, sparse-text mode (no paragraph
+      // layout assumptions — matches a loose crop of digit lines better
+      // than block mode, which was likely rejecting oversized glyphs as
+      // non-text and returning nothing).
+      let result = await runOcrPass(binary, frame.w, frame.h, '11');
+      let usedPass = 'binarized · sparse';
       let matches = result.text.match(/\d+/g);
 
-      // Pass 2 (fallback): plain contrast-enhanced grayscale, letting
-      // Tesseract's own internal binarization handle thresholding instead.
-      // Only run if pass 1 came back with no digits — keeps the common case
-      // fast while still giving a second chance when the first guess misses.
+      // Pass 2 (fallback): plain contrast-enhanced grayscale, same sparse
+      // mode, letting Tesseract's own internal binarization handle
+      // thresholding instead. Only run if pass 1 found no digits.
       if(!matches || matches.join('').length === 0){
         const enhanced = new Uint8ClampedArray(n);
         contrastStretch(frame.gray, frame.w, frame.h, enhanced);
-        const result2 = await runOcrPass(enhanced, frame.w, frame.h);
+        const result2 = await runOcrPass(enhanced, frame.w, frame.h, '11');
         const matches2 = result2.text.match(/\d+/g);
         if(matches2 && matches2.join('').length > 0){
           result = result2;
           matches = matches2;
-          usedPass = 'grayscale (fallback)';
+          usedPass = 'grayscale · sparse';
+        } else {
+          // Pass 3 (fallback): binarized image, but assume one uniform
+          // paragraph block instead — the reverse case, for text that
+          // actually does form a clean block shape.
+          const result3 = await runOcrPass(binary, frame.w, frame.h, '6');
+          const matches3 = result3.text.match(/\d+/g);
+          if(matches3 && matches3.join('').length > 0){
+            result = result3;
+            matches = matches3;
+            usedPass = 'binarized · block';
+          }
         }
       }
 
