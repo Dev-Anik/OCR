@@ -298,7 +298,7 @@
 <div class="card">
 
   <div class="header">
-    <div class="brand"><span class="dot"></span> Digit Scanner v3</div>
+    <div class="brand"><span class="dot"></span> Digit Scanner v4</div>
     <div style="display:flex; align-items:center; gap:8px;">
       <button class="debug-toggle" id="debugToggle" type="button">Debug</button>
       <div class="status-pill" id="statusPill">Starting camera…</div>
@@ -490,7 +490,17 @@
   async function initOcrWorker(){
     if(worker) return;
     try{
-      worker = await Tesseract.createWorker('eng', 1, {});
+      // Load the "best" (highest-accuracy) English model instead of the
+      // default "fast" one Tesseract.js normally fetches. It's a larger
+      // download (~15MB vs ~4MB) and noticeably slower per scan, but the
+      // recognition network itself is meaningfully more accurate — worth
+      // the trade for a tap-to-scan flow that isn't real-time anyway.
+      // Note: this points at Tesseract.js's community-run trained-data CDN
+      // from memory — if it fails to load (check the browser console/Network
+      // tab for a 404 on this host), tell me and I'll adjust the URL.
+      worker = await Tesseract.createWorker('eng', 1, {
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0_best'
+      });
       // Restrict recognizable characters to alphanumeric + basic punctuation.
       // This keeps enough context for the engine to segment words correctly
       // while cutting out noise, which is faster and more accurate than an
@@ -501,7 +511,12 @@
       await worker.setParameters({
         tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,:-/',
         tessedit_pageseg_mode: '6', // assume a single uniform block of text
-        preserve_interword_spaces: '1'
+        preserve_interword_spaces: '1',
+        // Tesseract's layout/feature heuristics are calibrated around a
+        // notion of DPI. Camera crops don't have a real DPI, but telling it
+        // to assume a documentish 300 gives its internal scaling logic a
+        // sane reference point instead of guessing from image size alone.
+        user_defined_dpi: '300'
       });
       workerReady = true;
     }catch(e){
@@ -685,7 +700,12 @@
     ctx.putImageData(imgData, 0, 0);
   }
 
-  async function runOcrPass(gray, w, h){
+  let currentPsm = '6';
+  async function runOcrPass(gray, w, h, psm){
+    if(psm && psm !== currentPsm){
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      currentPsm = psm;
+    }
     grayToCanvas(gray, w, h, workCanvas);
     const { data } = await worker.recognize(workCanvas);
     return { text: data.text || '', confidence: data.confidence || 0 };
@@ -704,7 +724,7 @@
     if(!workerReady){
       setBusy(true, 'Preparing…');
       let waited = 0;
-      while(!workerReady && waited < 8000){
+      while(!workerReady && waited < 25000){
         await new Promise(r => setTimeout(r, 150));
         waited += 150;
       }
